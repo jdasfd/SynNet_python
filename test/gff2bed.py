@@ -1,12 +1,13 @@
 """
 test/gff2bed.py - GFF3 to BED converter
-"""
+output: BED6
+chrom\tstart(0-based)\tend\tgene_id\tscore\tstrand
 
-# python test/gff2bed.py -i genome.gff -o genome.bed
-# python test/gff2bed.py -i genome.gff -t gene -k Name --primary-only
-# cat genome.gff | python test/gff2bed.py -o genome.bed
-# output: BED6
-# chrom\tstart(0-based)\tend\tgene_id\tscore\tstrand
+Usage:
+    python gff2bed.py -i genome.gff -o genome.bed
+    python gff2bed.py -i genome.gff -t gene -k Name --primary-only
+    python gff2bed.py -i genome.gff --min-length 100
+"""
 
 import sys
 import argparse
