@@ -1,0 +1,10 @@
+name: synnet
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - python=3.11
+  - jcvi>=1.4.0
+  - diamond>=2.1.8
+  - pandas>=2.0
+  - numpy>=1.24
