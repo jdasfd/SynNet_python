@@ -31,11 +31,7 @@ class NetworkStats:
     total_edges: int = 0
     lifted_edges: int = 0
     filtered_by_score: int = 0
-    filtered_by_cluster_size: int = 0
     species_pair_counts: Dict[str, int] = field(default_factory=dict)
-    n_clusters: int = 0
-    largest_cluster: int = 0
-    smallest_cluster: int = 0
 
 
 def load_species_list(list_file: str) -> List[str]:
@@ -164,69 +160,6 @@ def build_network(
     return edges, nodes, stats
 
 
-def cluster_connected_components(edges: List[AnchorEdge], nodes: Set[str]) -> List[Set[str]]:
-    if not _HAS_NX:
-        adj = defaultdict(set)
-        for e in edges:
-            adj[e.source].add(e.target)
-            adj[e.target].add(e.source)
-
-        visited = set()
-        clusters = []
-        for node in nodes:
-            if node in visited:
-                continue
-            cluster = set()
-            stack = [node]
-            while stack:
-                n = stack.pop()
-                if n in visited:
-                    continue
-                visited.add(n)
-                cluster.add(n)
-                stack.extend(adj[n] - visited)
-            clusters.append(cluster)
-        return sorted(clusters, key=len, reverse=True)
-
-    G = nx.Graph()
-    G.add_nodes_from(nodes)
-    for e in edges:
-        G.add_edge(e.source, e.target)
-    return sorted(nx.connected_components(G), key=len, reverse=True)
-
-
-def cluster_mcl(edges: List[AnchorEdge], nodes: Set[str], inflation: float = 2.0) -> List[Set[str]]:
-    if not _HAS_NX:
-        error("networkx required for MCL-like clustering")
-        return []
-
-    info("Falling back to connected components (install 'mcl' for MCL clustering)")
-    return cluster_connected_components(edges, nodes)
-
-
-def cluster_louvain(edges: List[AnchorEdge], nodes: Set[str]) -> List[Set[str]]:
-    if not _HAS_NX:
-        error("networkx required for Louvain clustering")
-        return []
-
-    try:
-        from networkx.algorithms.community import louvain_communities
-    except ImportError:
-        info("Louvain not available, falling back to connected components")
-        return cluster_connected_components(edges, nodes)
-
-    G = nx.Graph()
-    G.add_nodes_from(nodes)
-    for e in edges:
-        if G.has_edge(e.source, e.target):
-            G[e.source][e.target]['weight'] += e.score
-        else:
-            G.add_edge(e.source, e.target, weight=e.score)
-
-    communities = louvain_communities(G, weight='weight')
-    return sorted(communities, key=len, reverse=True)
-
-
 def export_tsv(edges: List[AnchorEdge], output_file: Path):
     with open(output_file, 'w') as f:
         f.write("source\ttarget\tscore\tis_lifted\tspecies_pair\tblock_id\n")
@@ -270,33 +203,13 @@ def export_gexf(edges: List[AnchorEdge], nodes: Set[str], output_file: Path):
     info(f"Exported: {output_file}")
 
 
-def export_clusters(clusters: List[Set[str]], output_file: Path):
-    with open(output_file, 'w') as f:
-        f.write("gene_id\tcluster_id\tcluster_size\n")
-        for cid, cluster in enumerate(clusters, 1):
-            size = len(cluster)
-            for gene in sorted(cluster):
-                f.write(f"{gene}\tCLUSTER_{cid:05d}\t{size}\n")
-    info(f"Exported: {output_file} ({len(clusters)} clusters)")
-
-
-def export_stats(stats: NetworkStats, clusters: List[Set[str]], output_file: Path):
-    if clusters:
-        sizes = [len(c) for c in clusters]
-        stats.n_clusters = len(clusters)
-        stats.largest_cluster = max(sizes)
-        stats.smallest_cluster = min(sizes)
-
+def export_stats(stats: NetworkStats, output_file: Path):
     with open(output_file, 'w') as f:
         f.write("# SynNet Network Statistics\n\n")
         f.write(f"total_nodes: {stats.total_nodes}\n")
         f.write(f"total_edges: {stats.total_edges}\n")
         f.write(f"lifted_edges: {stats.lifted_edges}\n")
         f.write(f"filtered_by_score: {stats.filtered_by_score}\n")
-        f.write(f"filtered_by_cluster_size: {stats.filtered_by_cluster_size}\n")
-        f.write(f"total_clusters: {stats.n_clusters}\n")
-        f.write(f"largest_cluster: {stats.largest_cluster}\n")
-        f.write(f"smallest_cluster: {stats.smallest_cluster}\n")
         f.write(f"\n# Per-species-pair edge counts\n")
         for pair, count in stats.species_pair_counts.items():
             f.write(f"  {pair}: {count}\n")
@@ -308,6 +221,7 @@ def run_network(
         species_list_file: str,
         *,
         work_dir: str = ".",
+        bed_dir: Optional[str] = None,
         use_lifted: bool = True,
         min_score: float = 0,
         exclude_lifted: bool = False,
@@ -316,6 +230,8 @@ def run_network(
         cluster_method: str = "cc",
         mcl_inflation: float = 2.0,
         min_cluster_size: int = 2,
+        min_species_count: int = 1,
+        ortholog_only: bool = False,
 ) -> dict:
     info("SynNet Network Builder")
 
@@ -355,32 +271,36 @@ def run_network(
     if "gexf" in fmt_list:
         export_gexf(edges, nodes, Path(f"{prefix}.gexf"))
 
-    info(f"\nClustering method: {cluster_method}")
-    if cluster_method == "cc":
-        clusters = cluster_connected_components(edges, nodes)
-    elif cluster_method == "mcl":
-        clusters = cluster_mcl(edges, nodes, inflation=mcl_inflation)
-    elif cluster_method == "louvain":
-        clusters = cluster_louvain(edges, nodes)
+    export_stats(stats, Path(f"{prefix}.stats.txt"))
+
+    simple_edges = [(e.source, e.target, e.score) for e in edges]
+
+    from synnet.modules.cluster import (
+        run_cluster, export_clusters, export_cluster_summary, build_gene_species_map,
+    )
+
+    bed_search_dir = bed_dir if bed_dir else work_dir
+    gene_species_map = build_gene_species_map(species, bed_search_dir)
+    if gene_species_map:
+        info(f"Built gene-species map: {len(gene_species_map)} genes from {len(set(gene_species_map.values()))} species")
     else:
-        clusters = cluster_connected_components(edges, nodes)
+        info("No .bed files found, species-based filtering will be disabled")
 
-    if clusters:
-        n_before = len(clusters)
-        clusters = [c for c in clusters if len(c) >= min_cluster_size]
-        n_filtered = n_before - len(clusters)
-        if n_filtered:
-            info(f"Filtered {n_filtered} clusters smaller than {min_cluster_size}")
-            stats.filtered_by_cluster_size = n_filtered
-        export_clusters(clusters, Path(f"{prefix}.clusters.tsv"))
-        if clusters:
-            sizes = [len(c) for c in clusters]
-            info(f"Clusters: {len(clusters)} total, "
-                 f"largest={max(sizes)}, smallest={min(sizes)}")
-        else:
-            warning("No clusters remaining after filtering")
+    result = run_cluster(
+        simple_edges, nodes, species,
+        method=cluster_method,
+        mcl_inflation=mcl_inflation,
+        min_cluster_size=min_cluster_size,
+        min_species_count=min_species_count,
+        ortholog_only=ortholog_only,
+        gene_species_map=gene_species_map if gene_species_map else None,
+    )
 
-    export_stats(stats, clusters, Path(f"{prefix}.stats.txt"))
+    if result.clusters:
+        export_clusters(result.clusters, Path(f"{prefix}.clusters.tsv"),
+                        gene_species_map=gene_species_map if gene_species_map else None)
+        export_cluster_summary(result.clusters, Path(f"{prefix}.clusters.summary.tsv"),
+                               gene_species_map=gene_species_map if gene_species_map else None)
 
     info("Completed!")
 
@@ -390,6 +310,9 @@ def run_network(
             "nodes": stats.total_nodes,
             "edges": stats.total_edges,
             "lifted_edges": stats.lifted_edges,
-            "clusters": stats.n_clusters,
+            "clusters": len(result.clusters),
+            "filtered_by_size": result.filtered_by_size,
+            "filtered_by_species": result.filtered_by_species,
+            "filtered_by_ortholog": result.filtered_by_ortholog,
         },
     }
