@@ -6,9 +6,9 @@ Output: Final_Network.tsv (node1, node2, score, is_lifted)
 
 Usage:
     python network.py -s species.lst
-    python network.py -s species.lst -i jcvi_output
-    python network.py -s species.lst -i jcvi_output --no-lifted
-    python network.py -s species.lst -i jcvi_output --min-score 0.5
+    python network.py -s species.lst -i jcvi_output -o network_output
+    python network.py -s species.lst --no-lifted
+    python network.py -s species.lst --min-score 0
 """
 
 import sys
@@ -42,8 +42,9 @@ class NetworkStats:
 def parse_anchors_file(
         anchor_file: Path,
         pair_name: str,
-        min_score: float = 0.0,
-) -> Tuple[List[Tuple[str, str, float, bool]], int, int]:
+        include_lifted: bool = True,
+        min_score: int = 0,
+) -> Tuple[List[Tuple[str, str, int, bool]], int, int]:
     edges = []
     n_total = 0
     n_filtered = 0
@@ -59,19 +60,24 @@ def parse_anchors_file(
                 continue
 
             gene1, gene2 = parts[0], parts[1]
-            score = 1.0
+            score = 0
             is_lifted = False
 
             if len(parts) >= 3:
+                score_str = parts[2]
+                if score_str.endswith('L'):
+                    is_lifted = True
+                    score_str = score_str[:-1]
                 try:
-                    score = float(parts[2])
+                    score = int(score_str)
                 except ValueError:
-                    score = 1.0
-
-            if gene1.endswith('L') or gene2.endswith('L'):
-                is_lifted = True
+                    score = 0
 
             n_total += 1
+
+            if is_lifted and not include_lifted:
+                n_filtered += 1
+                continue
 
             if score < min_score:
                 n_filtered += 1
@@ -85,14 +91,14 @@ def parse_anchors_file(
 def build_network(
         species_list: List[str],
         input_dir: Path,
-        use_lifted: bool = True,
-        min_score: float = 0.0,
-) -> Tuple[List[Tuple[str, str, float, bool]], Set[str], NetworkStats]:
+        include_lifted: bool = True,
+        min_score: int = 0,
+) -> Tuple[List[Tuple[str, str, int, bool]], Set[str], NetworkStats]:
     edges = []
     nodes = set()
     stats = NetworkStats()
 
-    suffix = ".lifted.anchors" if use_lifted else ".anchors"
+    suffix = ".lifted.anchors"
 
     for i in range(len(species_list) - 1):
         sp_a, sp_b = species_list[i], species_list[i + 1]
@@ -100,8 +106,7 @@ def build_network(
         anchor_file = input_dir / f"{pair_name}{suffix}"
 
         if not anchor_file.exists():
-            alt_suffix = ".anchors" if use_lifted else ".lifted.anchors"
-            alt_file = input_dir / f"{pair_name}{alt_suffix}"
+            alt_file = input_dir / f"{pair_name}.anchors"
             if alt_file.exists():
                 log_warn(f"{anchor_file.name} not found, using {alt_file.name}")
                 anchor_file = alt_file
@@ -110,7 +115,7 @@ def build_network(
                 continue
 
         pair_edges, n_total, n_filtered = parse_anchors_file(
-            anchor_file, pair_name, min_score=min_score
+            anchor_file, pair_name, include_lifted=include_lifted, min_score=min_score
         )
 
         stats.filtered_edges += n_filtered
@@ -132,13 +137,13 @@ def build_network(
 
 
 def write_network_tsv(
-        edges: List[Tuple[str, str, float, bool]],
+        edges: List[Tuple[str, str, int, bool]],
         output_file: Path,
 ) -> None:
     with open(output_file, 'w') as f:
         f.write("node1\tnode2\tscore\tis_lifted\n")
         for gene1, gene2, score, is_lifted in edges:
-            f.write(f"{gene1}\t{gene2}\t{score:.4f}\t{is_lifted}\n")
+            f.write(f"{gene1}\t{gene2}\t{score}\t{is_lifted}\n")
 
 
 def write_stats_txt(
@@ -161,10 +166,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python network.py -s species.lst                           # default: jcvi_output, use lifted
-  python network.py -s species.lst -i my_output              # custom input directory
-  python network.py -s species.lst --no-lifted               # use .anchors instead of .lifted.anchors
-  python network.py -s species.lst --min-score 0.5           # filter low-score edges
+  python network.py -s species.lst                           # default: jcvi_output -> network_output
+  python network.py -s species.lst -i my_input -o my_output
+  python network.py -s species.lst --no-lifted
+  python network.py -s species.lst --min-score 0.5
         """,
     )
 
@@ -172,12 +177,12 @@ Examples:
                         help="Species list file (determines pairwise order)")
     parser.add_argument("-i", "--input-dir", default="jcvi_output",
                         help="Input directory containing anchors files (default: jcvi_output)")
-    parser.add_argument("-o", "--output", default="Final_Network",
-                        help="Output prefix (default: Final_Network)")
+    parser.add_argument("-o", "--output-dir", default="network_output",
+                        help="Output directory for network files (default: network_output)")
     parser.add_argument("--no-lifted", action="store_true",
-                        help="Use .anchors instead of .lifted.anchors")
-    parser.add_argument("--min-score", type=float, default=0.0,
-                        help="Minimum score threshold (default: 0.0)")
+                        help="Exclude lifted alignments (rows with 'L' suffix in score)")
+    parser.add_argument("--min-score", type=int, default=0,
+                        help="Minimum score threshold (default: 0)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Verbose output")
 
@@ -199,19 +204,23 @@ Examples:
         log_error(f"Input directory not found: {input_dir}")
         sys.exit(1)
 
-    use_lifted = not args.no_lifted
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    include_lifted = not args.no_lifted
     log_info(f"Input dir: {input_dir}")
-    log_info(f"Use lifted: {use_lifted}")
+    log_info(f"Output dir: {output_dir}")
+    log_info(f"Include lifted: {include_lifted}")
     log_info(f"Min score: {args.min_score}")
 
     edges, nodes, stats = build_network(
         species, input_dir,
-        use_lifted=use_lifted,
+        include_lifted=include_lifted,
         min_score=args.min_score,
     )
 
-    output_tsv = Path(f"{args.output}.tsv")
-    output_stats = Path(f"{args.output}.stats.txt")
+    output_tsv = output_dir / "Final_Network.tsv"
+    output_stats = output_dir / "Final_Network.stats.txt"
 
     write_network_tsv(edges, output_tsv)
     write_stats_txt(stats, output_stats)
