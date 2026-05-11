@@ -18,4 +18,4 @@ build/
 *.suf
 *.tis
 
-test/results/
+test/jcvi_output/
