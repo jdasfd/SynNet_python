@@ -6,7 +6,7 @@ src_dir = Path(__file__).parent.parent
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-from synnet.utils.logger import setup_logger, info, error
+from synnet.utils.logger import setup_logger, info, warning, error
 from synnet._version import __version__
 
 COMMANDS = {}
@@ -17,12 +17,12 @@ def register(name):
         return func
     return decorator
 
-# ==== command 1: gff2bed (jcvi.annotation.reformat) ====
+# ==== command 1: gff2bed ====
 @register("gff2bed")
 def cmd_gff2bed(args):
     from synnet.modules.gff2bed import gff3_to_bed
 
-    info(f"Converting: {args.input} → {args.output or 'auto'}")
+    info(f"Converting: {args.input} -> {args.output or 'auto'}")
 
     try:
         output = gff3_to_bed(
@@ -40,12 +40,12 @@ def cmd_gff2bed(args):
         error(f"Failed: {e}")
         return 1
 
-# ==== command 2: automcscan (chain-wise JCVI ortholog) ====
-@register("automcscan")
-def cmd_automcscan(args):
+# ==== command 2: mcscan (chain-wise JCVI ortholog) ====
+@register("mcscan")
+def cmd_mcscan(args):
     from synnet.modules.mcscan import run_chain_ortholog
 
-    info(f"AutoMCScan: {args.species_list}")
+    info(f"MCScan: {args.species_list}")
 
     try:
         result = run_chain_ortholog(
@@ -54,6 +54,7 @@ def cmd_automcscan(args):
             min_size=args.min_size,
             cpus=args.cpus,
             dry_run=args.dry_run,
+            no_intra=args.no_intra,
         )
         if result["success"]:
             info("All comparisons completed successfully")
@@ -64,7 +65,7 @@ def cmd_automcscan(args):
         error(f"Failed: {e}")
         return 1
 
-# ==== command 3: network (build synteny network) ====
+# ==== command 3: network ====
 @register("network")
 def cmd_network(args):
     from synnet.modules.network import run_network
@@ -80,9 +81,6 @@ def cmd_network(args):
             exclude_lifted=args.exclude_lifted,
             output_prefix=args.output_prefix,
             formats=args.formats,
-            cluster_method=args.cluster,
-            mcl_inflation=args.mcl_inflation,
-            min_cluster_size=args.cluster_num,
         )
         if result["success"]:
             info("Network built successfully")
@@ -93,18 +91,123 @@ def cmd_network(args):
         error(f"Failed: {e}")
         return 1
 
+# ==== command 4: cluster ====
+@register("cluster")
+def cmd_cluster(args):
+    from synnet.modules.cluster import (
+        run_cluster, export_clusters, export_cluster_summary, build_gene_species_map,
+    )
+    from synnet.modules.network import load_species_list
+
+    info(f"Cluster: {args.input}")
+
+    try:
+        species = load_species_list(args.species_list)
+        info(f"Loaded {len(species)} species: {' -> '.join(species)}")
+
+        gene_species_map = build_gene_species_map(species, args.bed_dir)
+        if gene_species_map:
+            info(f"Built gene-species map: {len(gene_species_map)} genes")
+        else:
+            warning("No .bed files found, species-based filtering will be disabled")
+
+        edges = []
+        nodes = set()
+        with open(args.input, 'r') as f:
+            header = f.readline()
+            for line in f:
+                parts = line.rstrip('\n').split('\t')
+                if len(parts) < 3:
+                    continue
+                src, tgt = parts[0], parts[1]
+                try:
+                    score = float(parts[2])
+                except ValueError:
+                    score = 0.0
+                edges.append((src, tgt, score))
+                nodes.add(src)
+                nodes.add(tgt)
+
+        info(f"Loaded {len(edges)} edges, {len(nodes)} nodes")
+
+        result = run_cluster(
+            edges, nodes, species,
+            method=args.cluster,
+            mcl_inflation=args.mcl_inflation,
+            min_cluster_size=args.cluster_num,
+            min_species_count=args.min_species,
+            ortholog_only=args.ortholog_only,
+            gene_species_map=gene_species_map,
+        )
+
+        if result.clusters:
+            prefix = args.output_prefix
+            export_clusters(result.clusters, Path(f"{prefix}.clusters.tsv"),
+                            gene_species_map=gene_species_map)
+            export_cluster_summary(result.clusters, Path(f"{prefix}.clusters.summary.tsv"),
+                                   gene_species_map=gene_species_map)
+
+        info(f"\nFiltering summary:")
+        info(f"  Raw clusters: {result.n_before_filter}")
+        info(f"  Filtered by size < {args.cluster_num}: {result.filtered_by_size}")
+        info(f"  Filtered by species < {args.min_species}: {result.filtered_by_species}")
+        info(f"  Filtered by ortholog: {result.filtered_by_ortholog}")
+        info(f"  Final clusters: {len(result.clusters)}")
+
+        info("Clustering completed!")
+        return 0
+    except Exception as e:
+        error(f"Failed: {e}")
+        return 1
+
+# ==== command 5: viz ====
+@register("viz")
+def cmd_viz(args):
+    from synnet.modules.viz import run_viz
+
+    info(f"Viz: {args.cluster_tsv} + {args.network_tsv}")
+
+    try:
+        result = run_viz(
+            cluster_tsv=args.cluster_tsv,
+            network_tsv=args.network_tsv,
+            species_list_file=args.species_list,
+            bed_dir=args.bed_dir,
+            palette_file=args.palette,
+            output_dir=args.output_dir,
+            plot_type=args.plot_type,
+            layout=args.layout,
+            top_k=args.top_k,
+            top_clusters=args.top_clusters,
+            interactive=args.interactive,
+            dpi=args.dpi,
+        )
+        if result["success"]:
+            info("Visualization completed successfully")
+            for fmt, path in result.get("outputs", {}).items():
+                info(f"  {fmt}: {path}")
+        else:
+            error("Visualization failed")
+        return 0 if result["success"] else 1
+    except Exception as e:
+        error(f"Failed: {e}")
+        return 1
+
 def create_parser():
     parser = argparse.ArgumentParser(
         prog="python -m synnet",
-        description=f"SynNet v{__version__}: Synteny Network Builder",
+        description=f"SynNet v{__version__}: Synteny Network Builder\n\n"
+                    "Pipeline order: gff2bed -> mcscan -> network -> cluster -> viz",
         epilog="Use 'python -m synnet <command> --help' for command-specific help.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", metavar="<command>", help="Available commands")
     subparsers.required = True
 
-    p = subparsers.add_parser("gff2bed", help="Convert GFF3 to BED format")
+    # ---- gff2bed ----
+    p = subparsers.add_parser("gff2bed", help="Step 1: Convert GFF3 to BED format")
     p.add_argument("-i", "--input", required=True, help="Input GFF3 file")
     p.add_argument("-o", "--output", help="Output BED file (default: {input}.bed)")
     p.add_argument("-t", "--feat-type", default="mRNA", help="Feature type (default: mRNA)")
@@ -114,21 +217,25 @@ def create_parser():
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     p.set_defaults(func=cmd_gff2bed)
 
-    p = subparsers.add_parser("automcscan", help="Chain-wise MCScan (auto-detect sequence type)")
+    # ---- mcscan ----
+    p = subparsers.add_parser("mcscan", help="Step 2: Chain-wise MCScan (auto-detect sequence type)")
     p.add_argument("-s", "--species-list", required=True,
-                   help="Species list file (.lst/.txt), one name per line in current dir")
+                   help="Species list file (.lst/.txt), one name per line")
     p.add_argument("--cscore", type=float, default=0.7,
                    help="C-score cutoff (default: 0.7)")
     p.add_argument("--min-size", type=int, default=4,
                    help="Minimum anchors in a cluster (default: 4)")
     p.add_argument("--cpus", type=int, default=4,
                    help="CPU cores (default: 4)")
+    p.add_argument("--no-intra", action="store_true",
+                   help="Skip intra-species (self) synteny detection")
     p.add_argument("--dry-run", action="store_true",
                    help="Print commands without executing")
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    p.set_defaults(func=cmd_automcscan)
+    p.set_defaults(func=cmd_mcscan)
 
-    p = subparsers.add_parser("network", help="Build synteny network from .anchors files")
+    # ---- network ----
+    p = subparsers.add_parser("network", help="Step 3: Build synteny network from .anchors files")
     p.add_argument("-s", "--species-list", required=True,
                    help="Species list file (chain order)")
     p.add_argument("-d", "--work-dir", default=".",
@@ -143,6 +250,19 @@ def create_parser():
                    help="Output file prefix (default: Final_Network)")
     p.add_argument("--formats", type=str, default="tsv",
                    help="Output formats: tsv,graphml,gexf (comma-separated, default: tsv)")
+    p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    p.set_defaults(func=cmd_network)
+
+    # ---- cluster ----
+    p = subparsers.add_parser("cluster", help="Step 4: Cluster and filter synteny network")
+    p.add_argument("-i", "--input", required=True,
+                   help="Network TSV file (from 'network' command)")
+    p.add_argument("-s", "--species-list", required=True,
+                   help="Species list file (for species-based filtering)")
+    p.add_argument("-d", "--bed-dir", default=".",
+                   help="Directory containing .bed files for species mapping (default: current dir)")
+    p.add_argument("-o", "--output-prefix", default="Filtered",
+                   help="Output file prefix (default: Filtered)")
     p.add_argument("--cluster", type=str, default="cc",
                    choices=["cc", "mcl", "louvain"],
                    help="Clustering method: cc, mcl, louvain (default: cc)")
@@ -150,8 +270,44 @@ def create_parser():
                    help="MCL inflation parameter (default: 2.0)")
     p.add_argument("--cluster-num", type=int, default=2,
                    help="Minimum cluster size to keep (default: 2)")
+    p.add_argument("--min-species", type=int, default=1,
+                   help="Minimum number of species in a cluster (default: 1)")
+    p.add_argument("--ortholog-only", action="store_true",
+                   help="Keep only 1-to-1 ortholog clusters")
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
-    p.set_defaults(func=cmd_network)
+    p.set_defaults(func=cmd_cluster)
+
+    # ---- viz ----
+    p = subparsers.add_parser("viz", help="Step 5: Visualize synteny network (from cluster output)")
+    p.add_argument("-c", "--cluster-tsv", required=True,
+                   help="Cluster TSV file (from 'cluster' command, *.clusters.tsv)")
+    p.add_argument("-n", "--network-tsv", required=True,
+                   help="Network TSV file (from 'network' command)")
+    p.add_argument("-s", "--species-list", required=True,
+                   help="Species list file (for color coding and species mapping)")
+    p.add_argument("-d", "--bed-dir", default=".",
+                   help="Directory containing .bed files (for species mapping, default: current dir)")
+    p.add_argument("--palette", default=None,
+                   help="Custom species color palette file (TSV: species<tab>color)")
+    p.add_argument("--output-dir", default=".",
+                   help="Output directory for plots (default: current dir)")
+    p.add_argument("--plot-type", type=str, default="all",
+                   choices=["static", "tiled", "interactive", "all"],
+                   help="Plot type: static (ggraph-style), tiled (Cytoscape-style), "
+                        "interactive (HTML with controls), all (default: all)")
+    p.add_argument("--layout", type=str, default="force",
+                   choices=["force", "circular", "kamada_kawai"],
+                   help="Layout algorithm (default: force)")
+    p.add_argument("--top-k", type=int, default=None,
+                   help="Show only top K nodes by degree in network view (default: show all)")
+    p.add_argument("--top-clusters", type=int, default=20,
+                   help="Number of top clusters to show in tiled view (default: 20)")
+    p.add_argument("--interactive", action="store_true",
+                   help="Force interactive HTML output")
+    p.add_argument("--dpi", type=int, default=300,
+                   help="DPI for static plots (default: 300)")
+    p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
+    p.set_defaults(func=cmd_viz)
 
     return parser
 
