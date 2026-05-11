@@ -19,3 +19,4 @@ build/
 *.tis
 
 test/jcvi_output/
+test/network_output/
