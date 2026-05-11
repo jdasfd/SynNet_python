@@ -1,5 +1,5 @@
 """
-test/mcscan.py - Chain-wise MCScan alignment (auto-detect sequence type)
+test/mcscan.py - Step 2: Chain-wise MCScan alignment (auto-detect sequence type)
 
 Usage:
     python mcscan.py -s species.lst
@@ -15,11 +15,17 @@ from pathlib import Path
 from typing import List, Optional, Literal
 from dataclasses import dataclass
 
-test_dir = Path(__file__).parent
-if str(test_dir) not in sys.path:
-    sys.path.insert(0, str(test_dir))
 
-from utils.logger import setup_logger, info, warning, error, success, debug
+def log_info(msg):
+    print(f"[INFO] {msg}", file=sys.stderr)
+
+
+def log_warn(msg):
+    print(f"[WARN] {msg}", file=sys.stderr)
+
+
+def log_error(msg):
+    print(f"[ERROR] {msg}", file=sys.stderr)
 
 
 CONFIG = {
@@ -39,6 +45,7 @@ class SpeciesInfo:
     seq_file: Path
     bed_file: Path
 
+
 @dataclass
 class SpeciesPair:
     species_a: SpeciesInfo
@@ -57,6 +64,7 @@ def detect_seq_type(filepath: Path) -> Optional[Literal["prot", "cds"]]:
         return "cds"
     return None
 
+
 def load_species_from_current_dir(list_file: str) -> List[SpeciesInfo]:
     cwd = Path.cwd()
     species_list = []
@@ -67,8 +75,7 @@ def load_species_from_current_dir(list_file: str) -> List[SpeciesInfo]:
         raise FileNotFoundError(f"Species list not found: {list_path}, -s required")
 
     with open(list_file, 'r') as f:
-        names = [line.strip() for line in f
-                 if line.strip() and not line.startswith('#')]
+        names = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
     if len(names) < 2:
         raise ValueError(f"Species list must contain >= 2 names, got {len(names)}")
@@ -104,36 +111,23 @@ def load_species_from_current_dir(list_file: str) -> List[SpeciesInfo]:
             bed_file=bed_file,
         ))
 
-        debug(f"{name}: {seq_file.name} [{seq_type}], {bed_file.name}")
-
     if len(detected_types) > 1:
-        raise ValueError(
-            f"Mixed sequence types detected: {detected_types}."
-        )
-    info(f"Loaded {len(species_list)} species ({list(detected_types)[0]})")
-    info(f"Working directory: {cwd}")
+        raise ValueError(f"Mixed sequence types detected: {detected_types}.")
+
+    log_info(f"Loaded {len(species_list)} species ({list(detected_types)[0]})")
+    log_info(f"Working directory: {cwd}")
 
     return species_list
 
-def generate_chain_pairs(species_list: List[SpeciesInfo]) -> List[SpeciesPair]:
-    pairs = []
-    for i in range(len(species_list) - 1):
-        pairs.append(SpeciesPair(
-            species_a=species_list[i],
-            species_b=species_list[i + 1]
-        ))
-    return pairs
 
-def run_jcvi_ortholog(
-        pair: SpeciesPair,
-        *,
-        cscore: float,
-        min_size: int,
-        cpus: int,
-        dry_run: bool,
-) -> SpeciesPair:
+def generate_chain_pairs(species_list: List[SpeciesInfo]) -> List[SpeciesPair]:
+    return [SpeciesPair(species_a=species_list[i], species_b=species_list[i + 1])
+            for i in range(len(species_list) - 1)]
+
+
+def run_jcvi_ortholog(pair: SpeciesPair, *, cscore, min_size, cpus, dry_run) -> SpeciesPair:
     pair.status = "running"
-    info(f"Running: {pair.species_a.name} vs {pair.species_b.name}")
+    log_info(f"Running: {pair.species_a.name} vs {pair.species_b.name}")
 
     cmd = [
         "python", "-m", "jcvi.compara.catalog", "ortholog",
@@ -152,25 +146,19 @@ def run_jcvi_ortholog(
     if CONFIG["no_dotplot"]:
         cmd.append("--no_dotplot")
 
-    debug(f"CMD: {' '.join(cmd)}")
-
     if dry_run:
-        info("[DRY-RUN] Skip execution")
+        log_info("[DRY-RUN] Skip execution")
         pair.status = "done"
         pair.anchors_file = Path(f"{pair.species_a.name}.{pair.species_b.name}.anchors")
         return pair
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
             pair.status = "failed"
             pair.error_msg = f"jcvi returned code {result.returncode}"
-            error(f"JCVI failed: {pair.error_msg}")
+            log_error(f"JCVI failed: {pair.error_msg}")
             return pair
 
         prefix = f"{pair.species_a.name}.{pair.species_b.name}"
@@ -180,19 +168,20 @@ def run_jcvi_ortholog(
             pair.anchors_file = anchors
             pair.n_anchors = sum(1 for line in open(anchors) if not line.startswith('#'))
             pair.status = "done"
-            success(f"{pair.n_anchors} anchors")
+            log_info(f"{pair.n_anchors} anchors")
         else:
             pair.status = "failed"
             pair.error_msg = "No anchors generated"
-            warning(f"{pair.error_msg}")
+            log_warn(f"{pair.error_msg}")
 
         return pair
 
     except Exception as e:
         pair.status = "failed"
         pair.error_msg = str(e)
-        error(f"Exception: {e}")
+        log_error(f"Exception: {e}")
         return pair
+
 
 def run_chain_ortholog(
         species_list_file: str,
@@ -201,32 +190,23 @@ def run_chain_ortholog(
         min_size: int = 4,
         cpus: int = 4,
         dry_run: bool = False,
-        verbose: bool = False,
 ) -> dict:
-    setup_logger(level="DEBUG" if verbose else "INFO")
-
-    info("SynNet AutoMCScan")
-    info(f"List: {species_list_file}")
+    log_info("Step 2: SynNet AutoMCScan")
+    log_info(f"List: {species_list_file}")
 
     try:
         species = load_species_from_current_dir(species_list_file)
     except (FileNotFoundError, ValueError) as e:
-        error(f"Failed to load species: {e}")
+        log_error(f"Failed to load species: {e}")
         return {"success": False, "error": str(e)}
 
     pairs = generate_chain_pairs(species)
 
-    info(f"\nStarting {len(pairs)} comparisons...")
+    log_info(f"\nStarting {len(pairs)} comparisons...")
 
     for i, pair in enumerate(pairs, 1):
-        info(f"\n[{i}/{len(pairs)}]")
-        run_jcvi_ortholog(
-            pair,
-            cscore=cscore,
-            min_size=min_size,
-            cpus=cpus,
-            dry_run=dry_run,
-        )
+        log_info(f"\n[{i}/{len(pairs)}]")
+        run_jcvi_ortholog(pair, cscore=cscore, min_size=min_size, cpus=cpus, dry_run=dry_run)
 
     stats = {
         "total": len(pairs),
@@ -235,25 +215,21 @@ def run_chain_ortholog(
         "anchors": sum(p.n_anchors for p in pairs if p.status == "done"),
     }
 
-    info(f"\nResults: {stats['done']}/{stats['total']} done, {stats['anchors']} anchors")
+    log_info(f"\nResults: {stats['done']}/{stats['total']} done, {stats['anchors']} anchors")
 
     if stats["done"] > 0:
-        info(f"\nOutput files:")
+        log_info(f"\nOutput files:")
         for p in pairs:
             if p.status == "done" and p.anchors_file:
-                info(f"{p.anchors_file.name} ({p.n_anchors} anchors)")
+                log_info(f"{p.anchors_file.name} ({p.n_anchors} anchors)")
 
-    success("Completed!")
-
-    return {
-        "success": stats["failed"] == 0,
-        "stats": stats,
-    }
+    log_info("Done!")
+    return {"success": stats["failed"] == 0, "stats": stats}
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Chain-wise MCScan alignment (auto-detect sequence type)",
+        description="Step 2: Chain-wise MCScan alignment (auto-detect sequence type)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -286,7 +262,6 @@ Examples:
         min_size=args.min_size,
         cpus=args.cpus,
         dry_run=args.dry_run,
-        verbose=args.verbose,
     )
 
     sys.exit(0 if result["success"] else 1)
