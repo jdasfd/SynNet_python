@@ -73,7 +73,7 @@ def build_gene_species_map(species_list: List[str], bed_dir: pathlib.Path) -> Di
     return gene_map
 
 
-def load_synnet_tsv(synnet_file: pathlib.Path) -> Tuple[List[Tuple[str, str, int, str]], Set[str], Dict[str, Set[str]]]:
+def load_synnet_tsv(synnet_file: pathlib.Path) -> Tuple[List[Tuple[str, int, str, str]], Set[str], Dict[str, Set[str]]]:
     edges = []
     nodes = set()
     cluster_genes = collections.defaultdict(set)
@@ -89,7 +89,7 @@ def load_synnet_tsv(synnet_file: pathlib.Path) -> Tuple[List[Tuple[str, str, int
                 score = int(score_str)
             except ValueError:
                 score = 0
-            edges.append((cluster_id, node1, node2, score))
+            edges.append((cluster_id, score, node1, node2))
             nodes.add(node1)
             nodes.add(node2)
             cluster_genes[cluster_id].add(node1)
@@ -211,7 +211,7 @@ function exportPDF() {{
 
 
 def plot_interactive_network(
-        edges: List[Tuple[str, str, int, str]],
+        edges: List[Tuple[str, int, str, str]],
         nodes: Set[str],
         cluster_genes: Dict[str, Set[str]],
         gene_species_map: Dict[str, str],
@@ -227,7 +227,7 @@ def plot_interactive_network(
         sp = gene_species_map.get(node, "unknown")
         G.add_node(node, species=sp)
     
-    for cluster_id, node1, node2, score in edges:
+    for cluster_id, score, node1, node2 in edges:
         if G.has_edge(node1, node2):
             continue
         G.add_edge(node1, node2, cluster=cluster_id)
