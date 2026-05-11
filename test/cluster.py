@@ -74,7 +74,10 @@ def load_network(network_file: Path) -> Tuple[List[Tuple[str, str, int]], Set[st
             if len(parts) < 2:
                 continue
             node1, node2 = parts[0], parts[1]
-            score = int(parts[2]) if len(parts) >= 3 else 1
+            try:
+                score = int(parts[2]) if len(parts) >= 3 else 1
+            except ValueError:
+                score = 0
             edges.append((node1, node2, score))
             nodes.add(node1)
             nodes.add(node2)
