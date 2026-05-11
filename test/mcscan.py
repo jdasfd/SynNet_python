@@ -1,8 +1,9 @@
 """
 test/mcscan.py - Step 2: Chain-wise MCScan alignment (auto-detect sequence type)
 
-Uses jcvi.compara.catalog ortholog to perform pairwise alignments.
-Input: species list + .pep/.gff files in input directory
+Performs both intra-species (self) and inter-species (chain-wise) synteny detection.
+
+Input: species list + .pep/.gff/.bed files in input directory
 Output: .anchors/.lifted.anchors files in output directory
 
 Usage:
@@ -10,6 +11,7 @@ Usage:
     python mcscan.py -s species.lst -i seqs -o jcvi_output
     python mcscan.py -s species.lst -i seqs --cscore 0.9
     python mcscan.py -s species.lst -i seqs --min-size 5 --cpus 8
+    python mcscan.py -s species.lst -i seqs --no-intra    # skip intra-species
     python mcscan.py -s species.lst -i seqs --dry-run -v
 """
 
@@ -205,6 +207,55 @@ def run_jcvi_ortholog(pair: SpeciesPair, *, cscore, min_size, cpus, dry_run) -> 
         return pair
 
 
+def run_jcvi_self(species: SpeciesInfo, *, cscore, min_size, cpus, dry_run) -> dict:
+    log_info(f"Running intra-species: {species.name} vs {species.name}")
+
+    cmd = [
+        "python", "-m", "jcvi.compara.catalog", "ortholog",
+        species.name,
+        species.name,
+        "--dbtype", species.seq_type,
+        "--cpus", str(cpus),
+        "--cscore", str(cscore),
+        "--min_size", str(min_size),
+        "--dist", str(CONFIG["dist"]),
+        "--align_soft", CONFIG["align_soft"],
+    ]
+
+    if CONFIG["no_strip_names"]:
+        cmd.append("--no_strip_names")
+    if CONFIG["no_dotplot"]:
+        cmd.append("--no_dotplot")
+
+    if dry_run:
+        log_info(f"[DRY-RUN] Command: {' '.join(cmd)}")
+        return {"status": "done", "n_anchors": 0}
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            log_error(f"JCVI failed with code {result.returncode}")
+            if result.stderr:
+                log_error(f"stderr: {result.stderr[:500]}")
+            return {"status": "failed", "n_anchors": 0}
+
+        prefix = f"{species.name}.{species.name}"
+        anchors = Path(f"{prefix}.anchors")
+
+        if anchors.exists() and anchors.stat().st_size > 0:
+            n_anchors = sum(1 for line in open(anchors) if not line.startswith('#'))
+            log_info(f"{n_anchors} anchors (intra-species)")
+            return {"status": "done", "n_anchors": n_anchors, "file": str(anchors)}
+        else:
+            log_warn("No anchors generated for intra-species")
+            return {"status": "failed", "n_anchors": 0}
+
+    except Exception as e:
+        log_error(f"Exception: {e}")
+        return {"status": "failed", "n_anchors": 0}
+
+
 def run_chain_ortholog(
         species_list_file: str,
         *,
@@ -214,6 +265,7 @@ def run_chain_ortholog(
         min_size: int = 4,
         cpus: int = 4,
         dry_run: bool = False,
+        no_intra: bool = False,
 ) -> dict:
     log_info("Step 2: SynNet AutoMCScan")
     log_info(f"Species list: {species_list_file}")
@@ -242,9 +294,17 @@ def run_chain_ortholog(
     os.chdir(out_dir)
     log_info(f"Working directory: {out_dir}")
 
+    intra_results = []
+    if not no_intra:
+        log_info(f"\n=== Intra-species synteny ({len(species)} species) ===")
+        for i, sp in enumerate(species, 1):
+            log_info(f"\n[{i}/{len(species)}] Intra: {sp.name}")
+            result = run_jcvi_self(sp, cscore=cscore, min_size=min_size, cpus=cpus, dry_run=dry_run)
+            intra_results.append({"species": sp.name, **result})
+
     pairs = generate_chain_pairs(species)
 
-    log_info(f"\nStarting {len(pairs)} comparisons...")
+    log_info(f"\n=== Inter-species synteny ({len(pairs)} pairs) ===")
 
     for i, pair in enumerate(pairs, 1):
         log_info(f"\n[{i}/{len(pairs)}]")
@@ -254,23 +314,41 @@ def run_chain_ortholog(
 
     output_files = _copy_anchors_output(out_dir, pairs)
 
-    stats = {
+    intra_stats = {
+        "total": len(intra_results),
+        "done": sum(1 for r in intra_results if r.get("status") == "done"),
+        "anchors": sum(r.get("n_anchors", 0) for r in intra_results),
+    }
+
+    inter_stats = {
         "total": len(pairs),
         "done": sum(1 for p in pairs if p.status == "done"),
         "failed": sum(1 for p in pairs if p.status == "failed"),
         "anchors": sum(p.n_anchors for p in pairs if p.status == "done"),
     }
 
-    log_info(f"\nResults: {stats['done']}/{stats['total']} done, {stats['anchors']} anchors")
+    log_info(f"\n=== Results ===")
+    if not no_intra:
+        log_info(f"Intra-species: {intra_stats['done']}/{intra_stats['total']} done, {intra_stats['anchors']} anchors")
+    log_info(f"Inter-species: {inter_stats['done']}/{inter_stats['total']} done, {inter_stats['anchors']} anchors")
 
-    if stats["done"] > 0:
+    if inter_stats["done"] > 0 or intra_stats["done"] > 0:
         log_info(f"\nOutput files in {out_dir}:")
+        if not no_intra:
+            for r in intra_results:
+                if r.get("status") == "done" and r.get("file"):
+                    log_info(f"  {Path(r['file']).name} ({r['n_anchors']} anchors, intra)")
         for p in pairs:
             if p.status == "done" and p.anchors_file:
                 log_info(f"  {p.anchors_file.name} ({p.n_anchors} anchors)")
 
     log_info("Done!")
-    return {"success": stats["failed"] == 0, "stats": stats, "output_dir": str(out_dir)}
+    return {
+        "success": inter_stats["failed"] == 0,
+        "intra_stats": intra_stats,
+        "inter_stats": inter_stats,
+        "output_dir": str(out_dir)
+    }
 
 
 def main():
@@ -284,6 +362,7 @@ Examples:
   python mcscan.py -s species.lst -i seqs --cscore 0.9      # stricter C-score cutoff
   python mcscan.py -s species.lst -i seqs --min-size 5      # require larger anchor blocks
   python mcscan.py -s species.lst -i seqs --cpus 8          # use 8 CPU cores
+  python mcscan.py -s species.lst -i seqs --no-intra        # skip intra-species synteny
   python mcscan.py -s species.lst -i seqs --dry-run -v      # preview commands only
         """,
     )
@@ -300,6 +379,8 @@ Examples:
                         help="Minimum anchors in a cluster (default: 4)")
     parser.add_argument("--cpus", type=int, default=4,
                         help="CPU cores for LAST alignment (default: 4)")
+    parser.add_argument("--no-intra", action="store_true",
+                        help="Skip intra-species (self) synteny detection")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without executing")
     parser.add_argument("-v", "--verbose", action="store_true",
@@ -315,6 +396,7 @@ Examples:
         min_size=args.min_size,
         cpus=args.cpus,
         dry_run=args.dry_run,
+        no_intra=args.no_intra,
     )
 
     sys.exit(0 if result["success"] else 1)
