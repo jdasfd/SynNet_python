@@ -11,6 +11,14 @@ license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [{ name = "Yu-Qian Jiang", email = "yuqian_j@outlook.com" }]
 
+dependencies = [
+    "networkx>=2.8",
+]
+
+[project.optional-dependencies]
+mcl = ["mcl"]
+louvain = ["python-louvain>=0.16"]
+
 [project.scripts]
 synnet = "synnet.__main__:main"
 
