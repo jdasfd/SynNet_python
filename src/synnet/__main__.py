@@ -2,14 +2,11 @@ import argparse
 import sys
 from pathlib import Path
 
-src_dir = Path(__file__).parent.parent
-if str(src_dir) not in sys.path:
-    sys.path.insert(0, str(src_dir))
-
 from synnet.utils.logger import setup_logger, info, warning, error
 from synnet._version import __version__
 
 COMMANDS = {}
+
 
 def register(name):
     def decorator(func):
@@ -17,7 +14,7 @@ def register(name):
         return func
     return decorator
 
-# ==== command 1: gff2bed ====
+
 @register("gff2bed")
 def cmd_gff2bed(args):
     from synnet.modules.gff2bed import gff3_to_bed
@@ -40,7 +37,7 @@ def cmd_gff2bed(args):
         error(f"Failed: {e}")
         return 1
 
-# ==== command 2: mcscan (chain-wise JCVI ortholog) ====
+
 @register("mcscan")
 def cmd_mcscan(args):
     from synnet.modules.mcscan import run_chain_ortholog
@@ -65,7 +62,7 @@ def cmd_mcscan(args):
         error(f"Failed: {e}")
         return 1
 
-# ==== command 3: network ====
+
 @register("network")
 def cmd_network(args):
     from synnet.modules.network import run_network
@@ -91,7 +88,7 @@ def cmd_network(args):
         error(f"Failed: {e}")
         return 1
 
-# ==== command 4: cluster ====
+
 @register("cluster")
 def cmd_cluster(args):
     from synnet.modules.cluster import (
@@ -160,56 +157,46 @@ def cmd_cluster(args):
         error(f"Failed: {e}")
         return 1
 
-# ==== command 5: viz ====
+
 @register("viz")
 def cmd_viz(args):
-    from synnet.modules.viz import run_viz
+    from synnet.modules.viz import visualize_synnet
 
-    info(f"Viz: {args.cluster_tsv} + {args.network_tsv}")
+    info(f"Viz: {args.input}")
 
     try:
-        result = run_viz(
-            cluster_tsv=args.cluster_tsv,
-            network_tsv=args.network_tsv,
+        result = visualize_synnet(
+            synnet_file=args.input,
             species_list_file=args.species_list,
             bed_dir=args.bed_dir,
-            palette_file=args.palette,
             output_dir=args.output_dir,
-            plot_type=args.plot_type,
-            layout=args.layout,
-            top_k=args.top_k,
-            top_clusters=args.top_clusters,
-            interactive=args.interactive,
-            dpi=args.dpi,
         )
         if result["success"]:
             info("Visualization completed successfully")
-            for fmt, path in result.get("outputs", {}).items():
-                info(f"  {fmt}: {path}")
+            info(f"Output: {result.get('output', '')}")
         else:
-            error("Visualization failed")
+            error(f"Visualization failed: {result.get('error', 'see above')}")
         return 0 if result["success"] else 1
     except Exception as e:
         error(f"Failed: {e}")
         return 1
 
+
 def create_parser():
     parser = argparse.ArgumentParser(
-        prog="python -m synnet",
+        prog="synnet",
         description=f"SynNet v{__version__}: Synteny Network Builder\n\n"
-                    "Pipeline order: gff2bed -> mcscan -> network -> cluster -> viz",
-        epilog="Use 'python -m synnet <command> --help' for command-specific help.",
+                    "Pipeline: gff2bed -> mcscan -> network -> cluster -> viz",
+        epilog="Use 'synnet <command> --help' for command-specific help.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("-V", "--version", action="version", version=f"%(prog)s {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", metavar="<command>", help="Available commands")
-    subparsers.required = True
 
-    # ---- gff2bed ----
     p = subparsers.add_parser("gff2bed", help="Step 1: Convert GFF3 to BED format")
-    p.add_argument("-i", "--input", required=True, help="Input GFF3 file")
-    p.add_argument("-o", "--output", help="Output BED file (default: {input}.bed)")
+    p.add_argument("-i", "--input", required=True, help="Input GFF3 file or directory")
+    p.add_argument("-o", "--output", help="Output BED file or directory")
     p.add_argument("-t", "--feat-type", default="mRNA", help="Feature type (default: mRNA)")
     p.add_argument("-k", "--id-key", default="ID", help="Attribute key for gene ID (default: ID)")
     p.add_argument("--primary-only", action="store_true", help="Keep one entry per gene ID")
@@ -217,7 +204,6 @@ def create_parser():
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     p.set_defaults(func=cmd_gff2bed)
 
-    # ---- mcscan ----
     p = subparsers.add_parser("mcscan", help="Step 2: Chain-wise MCScan (auto-detect sequence type)")
     p.add_argument("-s", "--species-list", required=True,
                    help="Species list file (.lst/.txt), one name per line")
@@ -234,7 +220,6 @@ def create_parser():
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     p.set_defaults(func=cmd_mcscan)
 
-    # ---- network ----
     p = subparsers.add_parser("network", help="Step 3: Build synteny network from .anchors files")
     p.add_argument("-s", "--species-list", required=True,
                    help="Species list file (chain order)")
@@ -253,7 +238,6 @@ def create_parser():
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     p.set_defaults(func=cmd_network)
 
-    # ---- cluster ----
     p = subparsers.add_parser("cluster", help="Step 4: Cluster and filter synteny network")
     p.add_argument("-i", "--input", required=True,
                    help="Network TSV file (from 'network' command)")
@@ -277,39 +261,20 @@ def create_parser():
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     p.set_defaults(func=cmd_cluster)
 
-    # ---- viz ----
-    p = subparsers.add_parser("viz", help="Step 5: Visualize synteny network (from cluster output)")
-    p.add_argument("-c", "--cluster-tsv", required=True,
-                   help="Cluster TSV file (from 'cluster' command, *.clusters.tsv)")
-    p.add_argument("-n", "--network-tsv", required=True,
-                   help="Network TSV file (from 'network' command)")
+    p = subparsers.add_parser("viz", help="Step 5: Visualize synteny network (interactive HTML)")
+    p.add_argument("-i", "--input", required=True,
+                   help="Clusters.synnet.tsv file (from 'cluster' command)")
     p.add_argument("-s", "--species-list", required=True,
                    help="Species list file (for color coding and species mapping)")
     p.add_argument("-d", "--bed-dir", default=".",
-                   help="Directory containing .bed files (for species mapping, default: current dir)")
-    p.add_argument("--palette", default=None,
-                   help="Custom species color palette file (TSV: species<tab>color)")
-    p.add_argument("--output-dir", default=".",
-                   help="Output directory for plots (default: current dir)")
-    p.add_argument("--plot-type", type=str, default="all",
-                   choices=["static", "tiled", "interactive", "all"],
-                   help="Plot type: static (ggraph-style), tiled (Cytoscape-style), "
-                        "interactive (HTML with controls), all (default: all)")
-    p.add_argument("--layout", type=str, default="force",
-                   choices=["force", "circular", "kamada_kawai"],
-                   help="Layout algorithm (default: force)")
-    p.add_argument("--top-k", type=int, default=None,
-                   help="Show only top K nodes by degree in network view (default: show all)")
-    p.add_argument("--top-clusters", type=int, default=20,
-                   help="Number of top clusters to show in tiled view (default: 20)")
-    p.add_argument("--interactive", action="store_true",
-                   help="Force interactive HTML output")
-    p.add_argument("--dpi", type=int, default=300,
-                   help="DPI for static plots (default: 300)")
+                   help="Directory containing .bed files (default: current dir)")
+    p.add_argument("-o", "--output-dir", default=None,
+                   help="Output directory (default: same as input file)")
     p.add_argument("-v", "--verbose", action="store_true", help="Verbose output")
     p.set_defaults(func=cmd_viz)
 
     return parser
+
 
 def main():
     parser = create_parser()
@@ -322,6 +287,7 @@ def main():
     else:
         parser.print_help()
         return 1
+
 
 if __name__ == "__main__":
     sys.exit(main())
