@@ -1,24 +1,11 @@
 import sys
 from pathlib import Path
-from typing import List, Dict, Set, Optional, Tuple
+from typing import List, Dict, Set, Tuple
 from dataclasses import dataclass, field
 
-from synnet.utils.logger import get_logger, info, warning, error, debug
-from synnet.utils.io import (
-    read_species_list,
-    read_anchors_file,
-    write_network_tsv,
-    write_stats_file,
-    ensure_dir,
-)
+from synnet.utils.logger import get_logger, info, warning, error
 
 logger = get_logger(__name__)
-
-try:
-    import networkx as nx # type: ignore
-    _HAS_NX = True
-except ImportError:
-    _HAS_NX = False
 
 
 @dataclass
@@ -28,6 +15,8 @@ class NetworkStats:
     filtered_edges: int = 0
     total_nodes: int = 0
     pair_counts: Dict[str, int] = field(default_factory=dict)
+    intra_edges: int = 0
+    inter_edges: int = 0
 
 
 def parse_anchors_file(
@@ -84,6 +73,7 @@ def build_network(
         input_dir: Path,
         include_lifted: bool = True,
         min_score: int = 0,
+        include_intra: bool = True,
 ) -> Tuple[List[Tuple[str, str, int, bool]], Set[str], NetworkStats]:
     edges = []
     nodes = set()
@@ -118,8 +108,39 @@ def build_network(
                 stats.lifted_edges += 1
 
         edges.extend(pair_edges)
+        stats.inter_edges += len(pair_edges)
         stats.pair_counts[pair_name] = len(pair_edges)
         info(f"{anchor_file.name}: {len(pair_edges)} edges (total {n_total}, filtered {n_filtered})")
+
+    if include_intra:
+        for sp in species_list:
+            pair_name = f"{sp}.{sp}"
+            anchor_file = input_dir / f"{pair_name}{suffix}"
+
+            if not anchor_file.exists():
+                alt_file = input_dir / f"{pair_name}.anchors"
+                if alt_file.exists():
+                    warning(f"{anchor_file.name} not found, using {alt_file.name}")
+                    anchor_file = alt_file
+                else:
+                    continue
+
+            pair_edges, n_total, n_filtered = parse_anchors_file(
+                anchor_file, pair_name, include_lifted=include_lifted, min_score=min_score
+            )
+
+            stats.filtered_edges += n_filtered
+
+            for gene1, gene2, score, is_lifted in pair_edges:
+                nodes.add(gene1)
+                nodes.add(gene2)
+                if is_lifted:
+                    stats.lifted_edges += 1
+
+            edges.extend(pair_edges)
+            stats.intra_edges += len(pair_edges)
+            stats.pair_counts[pair_name] = len(pair_edges)
+            info(f"{anchor_file.name}: {len(pair_edges)} edges (intra, total {n_total}, filtered {n_filtered})")
 
     stats.total_edges = len(edges)
     stats.total_nodes = len(nodes)
@@ -144,6 +165,8 @@ def write_stats_txt(
     with open(output_file, 'w') as f:
         f.write(f"Total nodes: {stats.total_nodes}\n")
         f.write(f"Total edges: {stats.total_edges}\n")
+        f.write(f"  Inter-species edges: {stats.inter_edges}\n")
+        f.write(f"  Intra-species edges: {stats.intra_edges}\n")
         f.write(f"Lifted edges: {stats.lifted_edges}\n")
         f.write(f"Filtered edges (by score): {stats.filtered_edges}\n")
         f.write("\nEdges per species pair:\n")
@@ -157,49 +180,66 @@ def run_network(
         input_dir: str = "jcvi_output",
         output_dir: str = "network_output",
         no_lifted: bool = False,
+        no_intra: bool = False,
         min_score: int = 0,
 ) -> dict:
     info("Build Synteny Network")
 
-    species = read_species_list(species_list_file)
-    info(f"Species: {' -> '.join(species)}")
+    with open(species_list_file, 'r') as f:
+        species = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
-    in_dir = Path(input_dir)
-    if not in_dir.exists():
-        error(f"Input directory not found: {in_dir}")
-        return {"success": False, "error": f"Input directory not found: {in_dir}"}
+    if len(species) < 1:
+        error("Species list must contain at least 1 species")
+        return {"success": False, "error": "Species list must contain at least 1 species"}
 
-    out_dir = Path(output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    info(f"Species: {', '.join(species)}")
+
+    input_path = Path(input_dir)
+    if not input_path.exists():
+        error(f"Input directory not found: {input_path}")
+        return {"success": False, "error": f"Input directory not found: {input_path}"}
+
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
 
     include_lifted = not no_lifted
-    info(f"Input dir: {in_dir}")
-    info(f"Output dir: {out_dir}")
+    include_intra = not no_intra
+    info(f"Input dir: {input_path}")
+    info(f"Output dir: {output_path}")
     info(f"Include lifted: {include_lifted}")
+    info(f"Include intra-species: {include_intra}")
     info(f"Min score: {min_score}")
 
     edges, nodes, stats = build_network(
-        species, in_dir,
+        species, input_path,
         include_lifted=include_lifted,
         min_score=min_score,
+        include_intra=include_intra,
     )
 
-    output_tsv = out_dir / "Final_Network.tsv"
-    output_stats = out_dir / "Final_Network.stats.txt"
+    output_tsv = output_path / "Final_Network.tsv"
+    output_stats = output_path / "Final_Network.stats.txt"
 
     write_network_tsv_output(edges, output_tsv)
     write_stats_txt(stats, output_stats)
 
-    info(f"\nNetwork: {stats.total_nodes} nodes, {stats.total_edges} edges ({stats.lifted_edges} lifted)")
+    info(f"\nNetwork: {stats.total_nodes} nodes, {stats.total_edges} edges")
+    info(f"  Inter-species: {stats.inter_edges} edges")
+    info(f"  Intra-species: {stats.intra_edges} edges")
+    info(f"  Lifted: {stats.lifted_edges} edges")
     info(f"Exported: {output_tsv}")
     info(f"Exported: {output_stats}")
     info("Done!")
 
     return {
         "success": True,
+        "output_tsv": str(output_tsv),
+        "output_stats": str(output_stats),
         "stats": {
-            "nodes": stats.total_nodes,
-            "edges": stats.total_edges,
+            "total_nodes": stats.total_nodes,
+            "total_edges": stats.total_edges,
+            "inter_edges": stats.inter_edges,
+            "intra_edges": stats.intra_edges,
             "lifted_edges": stats.lifted_edges,
-        },
+        }
     }
