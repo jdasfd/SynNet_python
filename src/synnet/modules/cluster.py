@@ -418,8 +418,8 @@ def run_cluster(
 ) -> dict:
     info("Step 4: Cluster Synteny Network")
 
-    species_list_file = Path(species_list_file)
-    with open(species_list_file, 'r') as f:
+    species_list_path = Path(species_list_file)
+    with open(species_list_path, 'r') as f:
         species = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
     info(f"Species: {', '.join(species)}")
@@ -454,8 +454,10 @@ def run_cluster(
             clusters = cluster_label_propagation(edges, nodes)
         elif method == "spectral":
             clusters = cluster_spectral(edges, nodes, k=k)
+        else:
+            raise ValueError(f"Unknown method: {method}")
     except ImportError as e:
-        error(str(e))
+        warning(str(e))
         info("Falling back to connected components...")
         clusters = cluster_connected_components(edges, nodes)
     info(f"Found {len(clusters)} raw clusters")
@@ -486,7 +488,7 @@ def run_cluster(
     output_synnet = output_dir_path / "Clusters.synnet.tsv"
 
     if gene_list:
-        species_dir = species_list_file.parent
+        species_dir = species_list_path.parent
         gene_list_file = species_dir / gene_list
         if not gene_list_file.exists():
             error(f"Gene list file not found: {gene_list_file}")
@@ -510,4 +512,15 @@ def run_cluster(
         info(f"Exported: {output_synnet}")
 
     info("Done!")
-    return {"success": True}
+    return {
+        "success": True,
+        "output_clusters": str(output_clusters),
+        "output_summary": str(output_summary),
+        "output_synnet": str(output_synnet),
+        "stats": {
+            "total_clusters": stats.total_clusters,
+            "filtered_by_size": stats.filtered_by_size,
+            "filtered_by_species": stats.filtered_by_species,
+            "final_clusters": stats.final_clusters,
+        }
+    }

@@ -86,6 +86,7 @@ def cmd_network(args):
             input_dir=args.input_dir,
             output_dir=args.output_dir,
             no_lifted=args.no_lifted,
+            no_intra=args.no_intra,
             min_score=args.min_score,
         )
         if result["success"]:
@@ -160,13 +161,13 @@ def create_parser():
 
     p = subparsers.add_parser("gff2bed", help="Convert GFF3 to BED format")
     p.add_argument("-i", "--input", required=True,
-                   help="Input GFF3 file or directory [required]")
+                   help="Input GFF3 file or directory (batch mode with -s)")
     p.add_argument("-o", "--output",
                    help="Output BED file (single file mode only)")
     p.add_argument("-s", "--species-list",
-                   help="Species list file (one name per line)")
+                   help="Species list file for batch mode (one name per line)")
     p.add_argument("--output-dir",
-                   help="Output directory for BED files (default: same as input)")
+                   help="Output directory for BED files (batch mode, default: same as input)")
     p.add_argument("-t", "--feat-type", default="mRNA",
                    help="Feature type to extract (default: mRNA)")
     p.add_argument("-k", "--id-key", default="ID",
@@ -191,7 +192,7 @@ def create_parser():
     p.add_argument("--cpus", type=int, default=4,
                    help="CPU cores (default: 4)")
     p.add_argument("--no-intra", action="store_true",
-                   help="Skip self synteny detection")
+                   help="Skip intra-species (self) synteny detection")
     p.add_argument("--dry-run", action="store_true",
                    help="Print commands without executing")
     p.add_argument("-v", "--verbose", action="store_true",
@@ -207,6 +208,8 @@ def create_parser():
                    help="Output directory for network files (default: network_output)")
     p.add_argument("--no-lifted", action="store_true",
                    help="Exclude lifted alignments (rows with 'L' suffix in score)")
+    p.add_argument("--no-intra", action="store_true",
+                   help="Exclude intra-species (self) synteny edges")
     p.add_argument("--min-score", type=int, default=0,
                    help="Minimum score threshold (default: 0)")
     p.add_argument("-v", "--verbose", action="store_true",
