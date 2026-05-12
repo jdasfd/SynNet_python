@@ -4,14 +4,10 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.11
+  - python>=3.10
+  - pip
+  - networkx>=2.8
+  - python-louvain>=0.16
   - jcvi>=1.4.0
   - diamond>=2.1.8
   - last>=1500
-  - pandas>=2.0
-  - numpy>=1.24
-  - networkx>=2.8
-  - scipy>=1.10
-  - python-louvain>=0.16
-  - scikit-learn>=1.2
-  - pyvis>=0.3.2
