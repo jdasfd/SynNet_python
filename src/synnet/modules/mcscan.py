@@ -184,6 +184,64 @@ def run_jcvi_ortholog(
         return pair
 
 
+def run_jcvi_self(
+        species: SpeciesInfo,
+        *,
+        cscore: float,
+        min_size: int,
+        cpus: int,
+        dry_run: bool,
+) -> dict:
+    info(f"Running intra-species: {species.name} vs {species.name}")
+
+    cmd = [
+        "python", "-m", "jcvi.compara.catalog", "ortholog",
+        species.name,
+        species.name,
+        "--dbtype", species.seq_type,
+        "--cpus", str(cpus),
+        "--cscore", str(cscore),
+        "--min_size", str(min_size),
+        "--dist", str(CONFIG["dist"]),
+        "--align_soft", CONFIG["align_soft"],
+    ]
+
+    if CONFIG["no_strip_names"]:
+        cmd.append("--no_strip_names")
+    if CONFIG["no_dotplot"]:
+        cmd.append("--no_dotplot")
+
+    debug(f"CMD: {' '.join(cmd)}")
+
+    if dry_run:
+        info("[DRY-RUN] Skip execution")
+        return {"status": "done", "n_anchors": 0}
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        if result.returncode != 0:
+            error(f"JCVI failed with code {result.returncode}")
+            if result.stderr:
+                error(f"stderr: {result.stderr[:500]}")
+            return {"status": "failed", "n_anchors": 0}
+
+        prefix = f"{species.name}.{species.name}"
+        anchors = Path(f"{prefix}.anchors")
+
+        if anchors.exists() and anchors.stat().st_size > 0:
+            n_anchors = sum(1 for line in open(anchors) if not line.startswith('#'))
+            info(f"{n_anchors} anchors (intra-species)")
+            return {"status": "done", "n_anchors": n_anchors, "file": str(anchors)}
+        else:
+            warning("No anchors generated for intra-species")
+            return {"status": "failed", "n_anchors": 0}
+
+    except Exception as e:
+        error(f"Exception: {e}")
+        return {"status": "failed", "n_anchors": 0}
+
+
 def run_chain_ortholog(
         species_list_file: str,
         *,
@@ -191,6 +249,7 @@ def run_chain_ortholog(
         min_size: int = 4,
         cpus: int = 4,
         dry_run: bool = False,
+        no_intra: bool = False,
 ) -> dict:
     info("SynNet AutoMCScan")
     info(f"List: {species_list_file}")
@@ -201,9 +260,17 @@ def run_chain_ortholog(
         error(f"Failed to load species: {e}")
         return {"success": False, "error": str(e)}
 
+    intra_results = []
+    if not no_intra:
+        info(f"\n=== Intra-species synteny ({len(species)} species) ===")
+        for i, sp in enumerate(species, 1):
+            info(f"\n[{i}/{len(species)}] Intra: {sp.name}")
+            result = run_jcvi_self(sp, cscore=cscore, min_size=min_size, cpus=cpus, dry_run=dry_run)
+            intra_results.append({"species": sp.name, **result})
+
     pairs = generate_chain_pairs(species)
 
-    info(f"\nStarting {len(pairs)} comparisons...")
+    info(f"\n=== Inter-species synteny ({len(pairs)} pairs) ===")
 
     for i, pair in enumerate(pairs, 1):
         info(f"\n[{i}/{len(pairs)}]")
@@ -215,24 +282,38 @@ def run_chain_ortholog(
             dry_run=dry_run,
         )
 
-    stats = {
+    intra_stats = {
+        "total": len(intra_results),
+        "done": sum(1 for r in intra_results if r.get("status") == "done"),
+        "anchors": sum(r.get("n_anchors", 0) for r in intra_results),
+    }
+
+    inter_stats = {
         "total": len(pairs),
         "done": sum(1 for p in pairs if p.status == "done"),
         "failed": sum(1 for p in pairs if p.status == "failed"),
         "anchors": sum(p.n_anchors for p in pairs if p.status == "done"),
     }
 
-    info(f"\nResults: {stats['done']}/{stats['total']} done, {stats['anchors']} anchors")
+    info(f"\n=== Results ===")
+    if not no_intra:
+        info(f"Intra-species: {intra_stats['done']}/{intra_stats['total']} done, {intra_stats['anchors']} anchors")
+    info(f"Inter-species: {inter_stats['done']}/{inter_stats['total']} done, {inter_stats['anchors']} anchors")
 
-    if stats["done"] > 0:
+    if inter_stats["done"] > 0 or intra_stats["done"] > 0:
         info(f"\nOutput files:")
+        if not no_intra:
+            for r in intra_results:
+                if r.get("status") == "done" and r.get("file"):
+                    info(f"  {Path(r['file']).name} ({r['n_anchors']} anchors, intra)")
         for p in pairs:
             if p.status == "done" and p.anchors_file:
-                info(f"{p.anchors_file.name} ({p.n_anchors} anchors)")
+                info(f"  {p.anchors_file.name} ({p.n_anchors} anchors)")
 
     success("Completed!")
 
     return {
-        "success": stats["failed"] == 0,
-        "stats": stats,
+        "success": inter_stats["failed"] == 0,
+        "intra_stats": intra_stats,
+        "inter_stats": inter_stats,
     }
