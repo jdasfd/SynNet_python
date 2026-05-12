@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 
 from synnet.utils.logger import get_logger, info, warning, error, debug
+from synnet.utils.io import build_gene_species_map as io_build_gene_species_map
 
 logger = get_logger(__name__)
 
@@ -105,19 +106,7 @@ def run_clustering(
 
 
 def build_gene_species_map(species_list: List[str], work_dir: str = ".") -> Dict[str, str]:
-    gene_map = {}
-    wd = Path(work_dir)
-    for sp in species_list:
-        bed_file = wd / f"{sp}.bed"
-        if not bed_file.exists():
-            continue
-        with open(bed_file, 'r') as f:
-            for line in f:
-                parts = line.rstrip('\n').split('\t')
-                if len(parts) >= 4:
-                    gene_map[parts[3]] = sp
-        debug(f"Loaded {sum(1 for v in gene_map.values() if v == sp)} genes for {sp} from {bed_file.name}")
-    return gene_map
+    return io_build_gene_species_map(species_list, Path(work_dir))
 
 
 def infer_species_from_map(gene_id: str, gene_species_map: Dict[str, str]) -> Optional[str]:
