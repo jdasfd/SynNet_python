@@ -2,9 +2,15 @@ import sys
 from pathlib import Path
 from typing import List, Dict, Set, Optional, Tuple
 from dataclasses import dataclass, field
-from collections import defaultdict
 
 from synnet.utils.logger import get_logger, info, warning, error, debug
+from synnet.utils.io import (
+    read_species_list,
+    read_anchors_file,
+    write_network_tsv,
+    write_stats_file,
+    ensure_dir,
+)
 
 logger = get_logger(__name__)
 
@@ -34,35 +40,6 @@ class NetworkStats:
     species_pair_counts: Dict[str, int] = field(default_factory=dict)
 
 
-def load_species_list(list_file: str) -> List[str]:
-    with open(list_file, 'r') as f:
-        species = [line.strip() for line in f
-                   if line.strip() and not line.startswith('#')]
-    if len(species) < 2:
-        raise ValueError(f"Need >= 2 species, got {len(species)}")
-    return species
-
-
-def parse_anchor_line(line: str) -> Optional[Tuple[str, str, float, bool]]:
-    if line.startswith('#') or not line.strip():
-        return None
-
-    parts = line.rstrip('\n').split('\t')
-    if len(parts) < 3:
-        return None
-
-    gene_a, gene_b = parts[0], parts[1]
-    score_str = parts[2]
-
-    is_lifted = score_str.endswith('L')
-    try:
-        weight = float(score_str.rstrip('L'))
-    except ValueError:
-        weight = 0.0
-
-    return gene_a, gene_b, weight, is_lifted
-
-
 def parse_anchors_file(
         filepath: Path,
         species_pair: str,
@@ -71,39 +48,20 @@ def parse_anchors_file(
         exclude_lifted: bool = False,
 ) -> Tuple[List[AnchorEdge], int, int]:
     edges = []
-    block_id = 0
     n_total = 0
     n_skipped = 0
 
-    with open(filepath, 'r') as f:
-        for line in f:
-            if line.startswith('###'):
-                block_id += 1
-                continue
-
-            parsed = parse_anchor_line(line)
-            if not parsed:
-                continue
-
-            gene_a, gene_b, weight, is_lifted = parsed
-            n_total += 1
-
-            if exclude_lifted and is_lifted:
-                n_skipped += 1
-                continue
-
-            if weight < min_score:
-                n_skipped += 1
-                continue
-
-            edges.append(AnchorEdge(
-                source=gene_a,
-                target=gene_b,
-                score=weight,
-                is_lifted=is_lifted,
-                species_pair=species_pair,
-                block_id=block_id,
-            ))
+    for gene_a, gene_b, weight, is_lifted, block_id in read_anchors_file(
+            filepath, min_score=min_score, exclude_lifted=exclude_lifted):
+        n_total += 1
+        edges.append(AnchorEdge(
+            source=gene_a,
+            target=gene_b,
+            score=weight,
+            is_lifted=is_lifted,
+            species_pair=species_pair,
+            block_id=block_id,
+        ))
 
     return edges, n_total, n_skipped
 
@@ -161,12 +119,11 @@ def build_network(
 
 
 def export_tsv(edges: List[AnchorEdge], output_file: Path):
-    with open(output_file, 'w') as f:
-        f.write("source\ttarget\tscore\tis_lifted\tspecies_pair\tblock_id\n")
-        for e in edges:
-            f.write(f"{e.source}\t{e.target}\t{e.score}\t"
-                    f"{e.is_lifted}\t{e.species_pair}\t{e.block_id}\n")
-    info(f"Exported: {output_file}")
+    edge_tuples = [
+        (e.source, e.target, e.score, e.is_lifted, e.species_pair, e.block_id)
+        for e in edges
+    ]
+    write_network_tsv(output_file, edge_tuples)
 
 
 def export_graphml(edges: List[AnchorEdge], nodes: Set[str], output_file: Path):
@@ -204,17 +161,14 @@ def export_gexf(edges: List[AnchorEdge], nodes: Set[str], output_file: Path):
 
 
 def export_stats(stats: NetworkStats, output_file: Path):
-    with open(output_file, 'w') as f:
-        f.write("# SynNet Network Statistics\n\n")
-        f.write(f"total_nodes: {stats.total_nodes}\n")
-        f.write(f"total_edges: {stats.total_edges}\n")
-        f.write(f"lifted_edges: {stats.lifted_edges}\n")
-        f.write(f"filtered_by_score: {stats.filtered_by_score}\n")
-        f.write(f"\n# Per-species-pair edge counts\n")
-        for pair, count in stats.species_pair_counts.items():
-            f.write(f"  {pair}: {count}\n")
-
-    info(f"Exported: {output_file}")
+    stats_dict = {
+        "total_nodes": stats.total_nodes,
+        "total_edges": stats.total_edges,
+        "lifted_edges": stats.lifted_edges,
+        "filtered_by_score": stats.filtered_by_score,
+        "species_pair_counts": stats.species_pair_counts,
+    }
+    write_stats_file(output_file, stats_dict, title="SynNet Network Statistics")
 
 
 def run_network(
@@ -229,7 +183,7 @@ def run_network(
 ) -> dict:
     info("SynNet Network Builder")
 
-    species = load_species_list(species_list_file)
+    species = read_species_list(species_list_file)
     info(f"Loaded {len(species)} species: {' -> '.join(species)}")
 
     wd = Path(work_dir)
