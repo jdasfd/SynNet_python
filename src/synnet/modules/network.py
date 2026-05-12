@@ -221,17 +221,11 @@ def run_network(
         species_list_file: str,
         *,
         work_dir: str = ".",
-        bed_dir: Optional[str] = None,
         use_lifted: bool = True,
         min_score: float = 0,
         exclude_lifted: bool = False,
         output_prefix: str = "Final_Network",
         formats: str = "tsv",
-        cluster_method: str = "cc",
-        mcl_inflation: float = 2.0,
-        min_cluster_size: int = 2,
-        min_species_count: int = 1,
-        ortholog_only: bool = False,
 ) -> dict:
     info("SynNet Network Builder")
 
@@ -273,36 +267,7 @@ def run_network(
 
     export_stats(stats, Path(f"{prefix}.stats.txt"))
 
-    simple_edges = [(e.source, e.target, e.score) for e in edges]
-
-    from synnet.modules.cluster import (
-        run_cluster, export_clusters, export_cluster_summary, build_gene_species_map,
-    )
-
-    bed_search_dir = bed_dir if bed_dir else work_dir
-    gene_species_map = build_gene_species_map(species, bed_search_dir)
-    if gene_species_map:
-        info(f"Built gene-species map: {len(gene_species_map)} genes from {len(set(gene_species_map.values()))} species")
-    else:
-        info("No .bed files found, species-based filtering will be disabled")
-
-    result = run_cluster(
-        simple_edges, nodes, species,
-        method=cluster_method,
-        mcl_inflation=mcl_inflation,
-        min_cluster_size=min_cluster_size,
-        min_species_count=min_species_count,
-        ortholog_only=ortholog_only,
-        gene_species_map=gene_species_map if gene_species_map else None,
-    )
-
-    if result.clusters:
-        export_clusters(result.clusters, Path(f"{prefix}.clusters.tsv"),
-                        gene_species_map=gene_species_map if gene_species_map else None)
-        export_cluster_summary(result.clusters, Path(f"{prefix}.clusters.summary.tsv"),
-                               gene_species_map=gene_species_map if gene_species_map else None)
-
-    info("Completed!")
+    info("Network build completed!")
 
     return {
         "success": True,
@@ -310,9 +275,5 @@ def run_network(
             "nodes": stats.total_nodes,
             "edges": stats.total_edges,
             "lifted_edges": stats.lifted_edges,
-            "clusters": len(result.clusters),
-            "filtered_by_size": result.filtered_by_size,
-            "filtered_by_species": result.filtered_by_species,
-            "filtered_by_ortholog": result.filtered_by_ortholog,
         },
     }
