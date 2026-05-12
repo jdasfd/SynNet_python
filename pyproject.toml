@@ -1,16 +1,17 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "synnet"
 version = "0.1.0"
 description = "SynNet python version: automated pipeline powered by JCVI + Diamond"
 readme = "README.md"
-license = { text = "MIT" }
+license = {text = "MIT"}
 requires-python = ">=3.10"
-authors = [{ name = "Yu-Qian Jiang", email = "yuqian_j@outlook.com" }]
-
+authors = [
+    {name = "Yu-Qian Jiang", email = "yuqian_j@outlook.com"}
+]
 dependencies = [
     "networkx>=2.8",
 ]
@@ -22,5 +23,5 @@ louvain = ["python-louvain>=0.16"]
 [project.scripts]
 synnet = "synnet.__main__:main"
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/synnet"]
+[tool.setuptools.packages.find]
+where = ["src"]
