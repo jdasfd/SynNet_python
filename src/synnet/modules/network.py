@@ -15,78 +15,89 @@ from synnet.utils.io import (
 logger = get_logger(__name__)
 
 try:
-    import networkx as nx
+    import networkx as nx # type: ignore
     _HAS_NX = True
 except ImportError:
     _HAS_NX = False
 
 
 @dataclass
-class AnchorEdge:
-    source: str
-    target: str
-    score: float
-    is_lifted: bool
-    species_pair: str
-    block_id: int = 0
-
-
-@dataclass
 class NetworkStats:
-    total_nodes: int = 0
     total_edges: int = 0
     lifted_edges: int = 0
-    filtered_by_score: int = 0
-    species_pair_counts: Dict[str, int] = field(default_factory=dict)
+    filtered_edges: int = 0
+    total_nodes: int = 0
+    pair_counts: Dict[str, int] = field(default_factory=dict)
 
 
 def parse_anchors_file(
-        filepath: Path,
-        species_pair: str,
-        *,
-        min_score: float = 0,
-        exclude_lifted: bool = False,
-) -> Tuple[List[AnchorEdge], int, int]:
+        anchor_file: Path,
+        pair_name: str,
+        include_lifted: bool = True,
+        min_score: int = 0,
+) -> Tuple[List[Tuple[str, str, int, bool]], int, int]:
     edges = []
     n_total = 0
-    n_skipped = 0
+    n_filtered = 0
 
-    for gene_a, gene_b, weight, is_lifted, block_id in read_anchors_file(
-            filepath, min_score=min_score, exclude_lifted=exclude_lifted):
-        n_total += 1
-        edges.append(AnchorEdge(
-            source=gene_a,
-            target=gene_b,
-            score=weight,
-            is_lifted=is_lifted,
-            species_pair=species_pair,
-            block_id=block_id,
-        ))
+    with open(anchor_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
 
-    return edges, n_total, n_skipped
+            parts = line.split('\t')
+            if len(parts) < 2:
+                continue
+
+            gene1, gene2 = parts[0], parts[1]
+            score = 0
+            is_lifted = False
+
+            if len(parts) >= 3:
+                score_str = parts[2]
+                if score_str.endswith('L'):
+                    is_lifted = True
+                    score_str = score_str[:-1]
+                try:
+                    score = int(score_str)
+                except ValueError:
+                    score = 0
+
+            n_total += 1
+
+            if is_lifted and not include_lifted:
+                n_filtered += 1
+                continue
+
+            if score < min_score:
+                n_filtered += 1
+                continue
+
+            edges.append((gene1, gene2, score, is_lifted))
+
+    return edges, n_total, n_filtered
 
 
 def build_network(
         species_list: List[str],
-        work_dir: Path,
-        *,
-        use_lifted: bool = True,
-        min_score: float = 0,
-        exclude_lifted: bool = False,
-) -> Tuple[List[AnchorEdge], Set[str], NetworkStats]:
+        input_dir: Path,
+        include_lifted: bool = True,
+        min_score: int = 0,
+) -> Tuple[List[Tuple[str, str, int, bool]], Set[str], NetworkStats]:
     edges = []
     nodes = set()
     stats = NetworkStats()
-    suffix = ".lifted.anchors" if use_lifted else ".anchors"
+
+    suffix = ".lifted.anchors"
 
     for i in range(len(species_list) - 1):
         sp_a, sp_b = species_list[i], species_list[i + 1]
         pair_name = f"{sp_a}.{sp_b}"
-        anchor_file = work_dir / f"{pair_name}{suffix}"
+        anchor_file = input_dir / f"{pair_name}{suffix}"
 
         if not anchor_file.exists():
-            alt_suffix = ".anchors" if use_lifted else ".lifted.anchors"
-            alt_file = work_dir / f"{pair_name}{alt_suffix}"
+            alt_file = input_dir / f"{pair_name}.anchors"
             if alt_file.exists():
                 warning(f"{anchor_file.name} not found, using {alt_file.name}")
                 anchor_file = alt_file
@@ -94,134 +105,95 @@ def build_network(
                 warning(f"File not found: {pair_name}{suffix}")
                 continue
 
-        debug(f"Reading: {anchor_file}")
-        pair_edges, n_total, n_skipped = parse_anchors_file(
-            anchor_file, pair_name,
-            min_score=min_score,
-            exclude_lifted=exclude_lifted,
+        pair_edges, n_total, n_filtered = parse_anchors_file(
+            anchor_file, pair_name, include_lifted=include_lifted, min_score=min_score
         )
-        stats.filtered_by_score += n_skipped
 
-        for e in pair_edges:
-            nodes.add(e.source)
-            nodes.add(e.target)
-            if e.is_lifted:
+        stats.filtered_edges += n_filtered
+
+        for gene1, gene2, score, is_lifted in pair_edges:
+            nodes.add(gene1)
+            nodes.add(gene2)
+            if is_lifted:
                 stats.lifted_edges += 1
 
         edges.extend(pair_edges)
-        stats.species_pair_counts[pair_name] = len(pair_edges)
-        info(f"{anchor_file.name}: {len(pair_edges)} edges (total {n_total}, skipped {n_skipped})")
+        stats.pair_counts[pair_name] = len(pair_edges)
+        info(f"{anchor_file.name}: {len(pair_edges)} edges (total {n_total}, filtered {n_filtered})")
 
-    stats.total_nodes = len(nodes)
     stats.total_edges = len(edges)
+    stats.total_nodes = len(nodes)
 
     return edges, nodes, stats
 
 
-def export_tsv(edges: List[AnchorEdge], output_file: Path):
-    edge_tuples = [
-        (e.source, e.target, e.score, e.is_lifted, e.species_pair, e.block_id)
-        for e in edges
-    ]
-    write_network_tsv(output_file, edge_tuples)
+def write_network_tsv_output(
+        edges: List[Tuple[str, str, int, bool]],
+        output_file: Path,
+) -> None:
+    with open(output_file, 'w') as f:
+        f.write("node1\tnode2\tscore\tis_lifted\n")
+        for gene1, gene2, score, is_lifted in edges:
+            f.write(f"{gene1}\t{gene2}\t{score}\t{is_lifted}\n")
 
 
-def export_graphml(edges: List[AnchorEdge], nodes: Set[str], output_file: Path):
-    if not _HAS_NX:
-        warning("networkx not installed, skip GraphML")
-        return
-
-    G = nx.Graph()
-    G.add_nodes_from(nodes)
-    for e in edges:
-        G.add_edge(e.source, e.target,
-                   weight=e.score,
-                   is_lifted=e.is_lifted,
-                   species_pair=e.species_pair,
-                   block_id=e.block_id)
-    nx.write_graphml(G, output_file)
-    info(f"Exported: {output_file}")
-
-
-def export_gexf(edges: List[AnchorEdge], nodes: Set[str], output_file: Path):
-    if not _HAS_NX:
-        warning("networkx not installed, skip GEXF")
-        return
-
-    G = nx.Graph()
-    G.add_nodes_from(nodes)
-    for e in edges:
-        G.add_edge(e.source, e.target,
-                   weight=e.score,
-                   is_lifted=e.is_lifted,
-                   species_pair=e.species_pair,
-                   block_id=e.block_id)
-    nx.write_gexf(G, output_file)
-    info(f"Exported: {output_file}")
-
-
-def export_stats(stats: NetworkStats, output_file: Path):
-    stats_dict = {
-        "total_nodes": stats.total_nodes,
-        "total_edges": stats.total_edges,
-        "lifted_edges": stats.lifted_edges,
-        "filtered_by_score": stats.filtered_by_score,
-        "species_pair_counts": stats.species_pair_counts,
-    }
-    write_stats_file(output_file, stats_dict, title="SynNet Network Statistics")
+def write_stats_txt(
+        stats: NetworkStats,
+        output_file: Path,
+) -> None:
+    with open(output_file, 'w') as f:
+        f.write(f"Total nodes: {stats.total_nodes}\n")
+        f.write(f"Total edges: {stats.total_edges}\n")
+        f.write(f"Lifted edges: {stats.lifted_edges}\n")
+        f.write(f"Filtered edges (by score): {stats.filtered_edges}\n")
+        f.write("\nEdges per species pair:\n")
+        for pair, count in sorted(stats.pair_counts.items()):
+            f.write(f"  {pair}: {count}\n")
 
 
 def run_network(
         species_list_file: str,
         *,
-        work_dir: str = ".",
-        use_lifted: bool = True,
-        min_score: float = 0,
-        exclude_lifted: bool = False,
-        output_prefix: str = "Final_Network",
-        formats: str = "tsv",
+        input_dir: str = "jcvi_output",
+        output_dir: str = "network_output",
+        no_lifted: bool = False,
+        min_score: int = 0,
 ) -> dict:
-    info("SynNet Network Builder")
+    info("Build Synteny Network")
 
     species = read_species_list(species_list_file)
-    info(f"Loaded {len(species)} species: {' -> '.join(species)}")
+    info(f"Species: {' -> '.join(species)}")
 
-    wd = Path(work_dir)
-    if not wd.exists():
-        error(f"Work directory not found: {wd}")
-        return {"success": False, "error": f"Work directory not found: {wd}"}
+    in_dir = Path(input_dir)
+    if not in_dir.exists():
+        error(f"Input directory not found: {in_dir}")
+        return {"success": False, "error": f"Input directory not found: {in_dir}"}
 
-    info(f"Reading {'lifted ' if use_lifted else ''}anchors from {wd}")
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    include_lifted = not no_lifted
+    info(f"Input dir: {in_dir}")
+    info(f"Output dir: {out_dir}")
+    info(f"Include lifted: {include_lifted}")
+    info(f"Min score: {min_score}")
 
     edges, nodes, stats = build_network(
-        species, wd,
-        use_lifted=use_lifted,
+        species, in_dir,
+        include_lifted=include_lifted,
         min_score=min_score,
-        exclude_lifted=exclude_lifted,
     )
 
-    if not edges:
-        error("No edges found. Check input files.")
-        return {"success": False, "error": "No edges found"}
+    output_tsv = out_dir / "Final_Network.tsv"
+    output_stats = out_dir / "Final_Network.stats.txt"
 
-    info(f"\nNetwork: {stats.total_nodes} nodes, {stats.total_edges} edges "
-         f"({stats.lifted_edges} lifted)")
-    if stats.filtered_by_score:
-        info(f"Filtered by score < {min_score}: {stats.filtered_by_score} edges")
+    write_network_tsv_output(edges, output_tsv)
+    write_stats_txt(stats, output_stats)
 
-    fmt_list = [f.strip() for f in formats.split(',')]
-    prefix = output_prefix
-
-    if "tsv" in fmt_list:
-        export_tsv(edges, Path(f"{prefix}.tsv"))
-    if "graphml" in fmt_list:
-        export_graphml(edges, nodes, Path(f"{prefix}.graphml"))
-    if "gexf" in fmt_list:
-        export_gexf(edges, nodes, Path(f"{prefix}.gexf"))
-
-    export_stats(stats, Path(f"{prefix}.stats.txt"))
-
-    info("Network build completed!")
+    info(f"\nNetwork: {stats.total_nodes} nodes, {stats.total_edges} edges ({stats.lifted_edges} lifted)")
+    info(f"Exported: {output_tsv}")
+    info(f"Exported: {output_stats}")
+    info("Done!")
 
     return {
         "success": True,

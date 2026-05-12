@@ -1,4 +1,6 @@
+import os
 import subprocess
+import shutil
 from pathlib import Path
 from typing import List, Optional, Literal
 from dataclasses import dataclass
@@ -44,42 +46,36 @@ def detect_seq_type(filepath: Path) -> Optional[Literal["prot", "cds"]]:
     return None
 
 
-def load_species_from_current_dir(list_file: str) -> List[SpeciesInfo]:
-    cwd = Path.cwd()
+def load_species(list_file: str, input_dir: Path) -> List[SpeciesInfo]:
     species_list = []
     detected_types = set()
 
-    list_path = cwd / list_file
-    if not list_path.exists():
-        raise FileNotFoundError(f"Species list not found: {list_path}, -s required")
-
     with open(list_file, 'r') as f:
-        names = [line.strip() for line in f
-                 if line.strip() and not line.startswith('#')]
+        names = [line.strip() for line in f if line.strip() and not line.startswith('#')]
 
     if len(names) < 2:
-        raise ValueError(f"Species list must contain ≥2 names, got {len(names)}")
+        raise ValueError(f"Species list must contain >= 2 names, got {len(names)}")
 
     for name in names:
         seq_file = None
         seq_type = None
 
         for suffix in CONFIG["prot_suffixes"] + CONFIG["cds_suffixes"]:
-            candidate = cwd / f"{name}{suffix}"
+            candidate = input_dir / f"{name}{suffix}"
             if candidate.exists():
                 seq_file = candidate
                 seq_type = detect_seq_type(candidate)
                 break
 
         if not seq_file or not seq_type:
-            available = [f.name for f in cwd.glob(f"{name}.*") if f.suffix]
+            available = [f.name for f in input_dir.glob(f"{name}.*") if f.suffix]
             raise FileNotFoundError(
-                f"Missing sequence file for '{name}' in current directory.\n"
+                f"Missing sequence file for '{name}' in {input_dir}.\n"
                 f"Expected: {'/'.join(CONFIG['prot_suffixes'])} or {'/'.join(CONFIG['cds_suffixes'])}\n"
-                f"Found in {cwd}: {available or 'none'}\n"
+                f"Found: {available or 'none'}\n"
             )
 
-        bed_file = cwd / f"{name}.bed"
+        bed_file = input_dir / f"{name}.bed"
         if not bed_file.exists():
             raise FileNotFoundError(f"Missing BED file: {bed_file}")
 
@@ -91,36 +87,24 @@ def load_species_from_current_dir(list_file: str) -> List[SpeciesInfo]:
             bed_file=bed_file,
         ))
 
-        debug(f"{name}: {seq_file.name} [{seq_type}], {bed_file.name}")
-
-    if len(detected_types) > 1:
-        raise ValueError(
-            f"Mixed sequence types detected: {detected_types}."
-        )
     info(f"Loaded {len(species_list)} species ({list(detected_types)[0]})")
-    info(f"Working directory: {cwd}")
-
     return species_list
 
 
 def generate_chain_pairs(species_list: List[SpeciesInfo]) -> List[SpeciesPair]:
-    pairs = []
-    for i in range(len(species_list) - 1):
-        pairs.append(SpeciesPair(
-            species_a=species_list[i],
-            species_b=species_list[i + 1]
-        ))
-    return pairs
+    return [SpeciesPair(species_a=species_list[i], species_b=species_list[i + 1])
+            for i in range(len(species_list) - 1)]
 
 
-def run_jcvi_ortholog(
-        pair: SpeciesPair,
-        *,
-        cscore: float,
-        min_size: int,
-        cpus: int,
-        dry_run: bool,
-) -> SpeciesPair:
+def _symlink_to_dir(files: List[Path], target_dir: Path):
+    for f in files:
+        link = target_dir / f.name
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        link.symlink_to(f.resolve())
+
+
+def run_jcvi_ortholog(pair: SpeciesPair, *, cscore, min_size, cpus, dry_run) -> SpeciesPair:
     pair.status = "running"
     info(f"Running: {pair.species_a.name} vs {pair.species_b.name}")
 
@@ -150,16 +134,14 @@ def run_jcvi_ortholog(
         return pair
 
     try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-        )
+        result = subprocess.run(cmd, capture_output=True, text=True)
 
         if result.returncode != 0:
             pair.status = "failed"
             pair.error_msg = f"jcvi returned code {result.returncode}"
             error(f"JCVI failed: {pair.error_msg}")
+            if result.stderr:
+                error(f"stderr: {result.stderr[:500]}")
             return pair
 
         prefix = f"{pair.species_a.name}.{pair.species_b.name}"
@@ -184,14 +166,7 @@ def run_jcvi_ortholog(
         return pair
 
 
-def run_jcvi_self(
-        species: SpeciesInfo,
-        *,
-        cscore: float,
-        min_size: int,
-        cpus: int,
-        dry_run: bool,
-) -> dict:
+def run_jcvi_self(species: SpeciesInfo, *, cscore, min_size, cpus, dry_run) -> dict:
     info(f"Running intra-species: {species.name} vs {species.name}")
 
     cmd = [
@@ -245,20 +220,40 @@ def run_jcvi_self(
 def run_chain_ortholog(
         species_list_file: str,
         *,
+        input_dir: str = ".",
+        output_dir: str = "jcvi_output",
         cscore: float = 0.7,
         min_size: int = 4,
         cpus: int = 4,
         dry_run: bool = False,
         no_intra: bool = False,
 ) -> dict:
-    info("SynNet AutoMCScan")
-    info(f"List: {species_list_file}")
+    info("Step 2: SynNet AutoMCScan")
+    info(f"Species list: {species_list_file}")
+    info(f"Input dir: {input_dir}")
+    info(f"Output dir: {output_dir}")
+
+    in_dir = Path(input_dir).resolve()
+    out_dir = Path(output_dir).resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        species = load_species_from_current_dir(species_list_file)
+        species = load_species(species_list_file, in_dir)
     except (FileNotFoundError, ValueError) as e:
         error(f"Failed to load species: {e}")
         return {"success": False, "error": str(e)}
+
+    all_input_files = []
+    for sp in species:
+        all_input_files.append(sp.seq_file)
+        all_input_files.append(sp.bed_file)
+
+    _symlink_to_dir(all_input_files, out_dir)
+    info(f"Symlinked {len(all_input_files)} input files to {out_dir}")
+
+    original_cwd = Path.cwd()
+    os.chdir(out_dir)
+    info(f"Working directory: {out_dir}")
 
     intra_results = []
     if not no_intra:
@@ -274,13 +269,9 @@ def run_chain_ortholog(
 
     for i, pair in enumerate(pairs, 1):
         info(f"\n[{i}/{len(pairs)}]")
-        run_jcvi_ortholog(
-            pair,
-            cscore=cscore,
-            min_size=min_size,
-            cpus=cpus,
-            dry_run=dry_run,
-        )
+        run_jcvi_ortholog(pair, cscore=cscore, min_size=min_size, cpus=cpus, dry_run=dry_run)
+
+    os.chdir(original_cwd)
 
     intra_stats = {
         "total": len(intra_results),
@@ -301,7 +292,7 @@ def run_chain_ortholog(
     info(f"Inter-species: {inter_stats['done']}/{inter_stats['total']} done, {inter_stats['anchors']} anchors")
 
     if inter_stats["done"] > 0 or intra_stats["done"] > 0:
-        info(f"\nOutput files:")
+        info(f"\nOutput files in {out_dir}:")
         if not no_intra:
             for r in intra_results:
                 if r.get("status") == "done" and r.get("file"):
@@ -310,10 +301,10 @@ def run_chain_ortholog(
             if p.status == "done" and p.anchors_file:
                 info(f"  {p.anchors_file.name} ({p.n_anchors} anchors)")
 
-    success("Completed!")
-
+    success("Done!")
     return {
         "success": inter_stats["failed"] == 0,
         "intra_stats": intra_stats,
         "inter_stats": inter_stats,
+        "output_dir": str(out_dir)
     }

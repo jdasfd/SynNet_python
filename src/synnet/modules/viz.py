@@ -1,21 +1,15 @@
 import sys
 import json
 from pathlib import Path
-from typing import List, Dict, Set, Optional, Tuple
+from typing import List, Dict, Set, Tuple, Optional
 from collections import defaultdict
 
-from synnet.utils.logger import get_logger, info, warning, error, debug
-from synnet.utils.io import (
-    read_species_list,
-    read_synnet_tsv,
-    build_gene_species_map,
-    ensure_dir,
-)
+from synnet.utils.logger import get_logger, info, warning, error
 
 logger = get_logger(__name__)
 
 try:
-    import networkx as nx
+    import networkx as nx # type: ignore
     _HAS_NX = True
 except ImportError:
     _HAS_NX = False
@@ -29,7 +23,52 @@ DEFAULT_PALETTE = [
 ]
 
 
-def build_species_color_map(species_list: List[str], palette_file: Optional[str] = None) -> Dict[str, str]:
+def load_species_list(list_file: str) -> List[str]:
+    with open(list_file, 'r') as f:
+        return [line.strip() for line in f if line.strip() and not line.startswith('#')]
+
+
+def build_gene_species_map(species_list: List[str], bed_dir: Path) -> Dict[str, str]:
+    gene_map = {}
+    for sp in species_list:
+        bed_file = bed_dir / f"{sp}.bed"
+        if not bed_file.exists():
+            warning(f"BED file not found: {bed_file}")
+            continue
+        with open(bed_file, 'r') as f:
+            for line in f:
+                parts = line.rstrip('\n').split('\t')
+                if len(parts) >= 4:
+                    gene_map[parts[3]] = sp
+    return gene_map
+
+
+def load_synnet_tsv(synnet_file: Path) -> Tuple[List[Tuple[str, int, str, str]], Set[str], Dict[str, Set[str]]]:
+    edges = []
+    nodes = set()
+    cluster_genes = defaultdict(set)
+
+    with open(synnet_file, 'r') as f:
+        header = f.readline()
+        for line in f:
+            parts = line.rstrip('\n').split('\t')
+            if len(parts) < 4:
+                continue
+            cluster_id, score_str, node1, node2 = parts[0], parts[1], parts[2], parts[3]
+            try:
+                score = int(score_str)
+            except ValueError:
+                score = 0
+            edges.append((cluster_id, score, node1, node2))
+            nodes.add(node1)
+            nodes.add(node2)
+            cluster_genes[cluster_id].add(node1)
+            cluster_genes[cluster_id].add(node2)
+
+    return edges, nodes, dict(cluster_genes)
+
+
+def build_species_color_map(species_list: List[str]) -> Dict[str, str]:
     return {sp: DEFAULT_PALETTE[i % len(DEFAULT_PALETTE)] for i, sp in enumerate(species_list)}
 
 
@@ -144,8 +183,7 @@ def plot_interactive_network(
         species_list: List[str],
         species_color_map: Dict[str, str],
         output_file: Path,
-        title: Optional[str] = None,
-) -> str:
+) -> None:
     if not _HAS_NX:
         raise ImportError("networkx required for interactive plot")
 
@@ -204,7 +242,7 @@ def plot_interactive_network(
         })
 
     html = _INTERACTIVE_TEMPLATE
-    html = html.replace('__TITLE__', title or 'SynNet Visualization')
+    html = html.replace('__TITLE__', 'SynNet Visualization')
     html = html.replace('__NODES_JSON__', json.dumps(vis_nodes))
     html = html.replace('__EDGES_JSON__', json.dumps(vis_edges))
     html = html.replace('__SPECIES_LIST__', json.dumps(species_list))
@@ -216,46 +254,48 @@ def plot_interactive_network(
         f.write(html)
 
     info(f"Interactive plot saved: {output_file}")
-    return str(output_file)
 
 
 def visualize_synnet(
-        synnet_file: str,
+        input_file: str,
         species_list_file: str,
         bed_dir: str,
+        *,
         output_dir: Optional[str] = None,
-) -> Dict[str, any]:
-    species_list = read_species_list(species_list_file)
+) -> dict:
+    info("Visualize Synteny Network")
+
+    if not _HAS_NX:
+        error("networkx is required")
+        info("Install: pip install networkx")
+        return {"success": False, "error": "networkx required"}
+
+    input_path = Path(input_file)
+    if not input_path.exists():
+        error(f"Input file not found: {input_path}")
+        return {"success": False, "error": f"Input file not found: {input_path}"}
+
+    species_list = load_species_list(species_list_file)
     info(f"Species: {', '.join(species_list)}")
 
-    gene_species_map = build_gene_species_map(species_list, Path(bed_dir))
+    bed_dir_path = Path(bed_dir)
+    gene_species_map = build_gene_species_map(species_list, bed_dir_path)
     info(f"Loaded {len(gene_species_map)} gene-species mappings")
 
-    species_color_map = build_species_color_map(species_list, None)
+    species_color_map = build_species_color_map(species_list)
 
-    synnet_path = Path(synnet_file)
-    info(f"Loading: {synnet_path}")
-    edges, nodes, cluster_genes = read_synnet_tsv(synnet_path)
+    info(f"Loading: {input_path}")
+    edges, nodes, cluster_genes = load_synnet_tsv(input_path)
     info(f"Loaded {len(edges)} edges, {len(nodes)} nodes, {len(cluster_genes)} clusters")
 
     if output_dir:
-        out_dir = Path(output_dir)
+        output_dir_path = Path(output_dir)
     else:
-        out_dir = synnet_path.parent
-    out_dir.mkdir(parents=True, exist_ok=True)
+        output_dir_path = input_path.parent
+    output_dir_path.mkdir(parents=True, exist_ok=True)
 
-    output_html = out_dir / "Clusters.synnet.html"
+    output_html = output_dir_path / "Clusters.synnet.html"
+    plot_interactive_network(edges, nodes, cluster_genes, gene_species_map, species_list, species_color_map, output_html)
 
-    if not _HAS_NX:
-        error("networkx is required for visualization")
-        info("Install: pip install networkx")
-        return {"success": False, "error": "Missing dependencies"}
-
-    plot_interactive_network(
-        edges, nodes, cluster_genes,
-        gene_species_map, species_list, species_color_map,
-        output_html,
-    )
-
-    info(f"Done! Output: {output_html}")
+    info("Done!")
     return {"success": True, "output": str(output_html)}
