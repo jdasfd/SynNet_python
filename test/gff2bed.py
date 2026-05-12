@@ -202,7 +202,7 @@ Examples:
     )
 
     parser.add_argument("-i", "--input", required=True,
-                        help="Input GFF3 file or directory (batch mode with -s)")
+                        help="Input GFF3 file or directory")
     parser.add_argument("-o", "--output",
                         help="Output BED file (single file mode only)")
     parser.add_argument("-s", "--species-list",

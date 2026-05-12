@@ -160,7 +160,7 @@ def create_parser():
 
     p = subparsers.add_parser("gff2bed", help="Convert GFF3 to BED format")
     p.add_argument("-i", "--input", required=True,
-                   help="Input GFF3 file or directory")
+                   help="Input GFF3 file or directory [required]")
     p.add_argument("-o", "--output",
                    help="Output BED file (single file mode only)")
     p.add_argument("-s", "--species-list",
@@ -179,7 +179,7 @@ def create_parser():
 
     p = subparsers.add_parser("mcscan", help="Chain-wise MCScan")
     p.add_argument("-s", "--species-list", required=True,
-                   help="Species list file")
+                   help="Species list file [required]")
     p.add_argument("-i", "--input-dir", default=".",
                    help="Directory containing sequence and annotation files (default: current dir)")
     p.add_argument("-o", "--output-dir", default="jcvi_output",
@@ -200,7 +200,7 @@ def create_parser():
 
     p = subparsers.add_parser("network", help="Build synteny network")
     p.add_argument("-s", "--species-list", required=True,
-                   help="Species list file")
+                   help="Species list file [required]")
     p.add_argument("-i", "--input-dir", default="jcvi_output",
                    help="Input directory containing anchors files (default: jcvi_output)")
     p.add_argument("-o", "--output-dir", default="network_output",
@@ -215,11 +215,11 @@ def create_parser():
 
     p = subparsers.add_parser("cluster", help="Cluster synteny network and filter")
     p.add_argument("-i", "--input", required=True,
-                   help="Input network TSV file (from network step)")
+                   help="Input network TSV file (from network step) [required]")
     p.add_argument("-s", "--species-list", required=True,
-                   help="Species list file")
+                   help="Species list file [required]")
     p.add_argument("-b", "--bed-dir", required=True,
-                   help="Directory containing .bed files (for gene-species mapping)")
+                   help="Directory containing .bed files (for gene-species mapping) [required]")
     p.add_argument("-o", "--output-dir", default="network_output",
                    help="Output directory (default: network_output)")
     p.add_argument("--method",
@@ -238,11 +238,11 @@ def create_parser():
                    help="Verbose output")
     p.set_defaults(func=cmd_cluster)
 
-    p = subparsers.add_parser("viz", help="Step 5: Visualize synteny network (interactive HTML)")
+    p = subparsers.add_parser("viz", help="Visualize synteny network (interactive HTML)")
     p.add_argument("-i", "--input", required=True,
-                   help="Clusters.synnet.tsv file (from cluster command)")
+                   help="Clusters.synnet.tsv file (from cluster command) [required]")
     p.add_argument("-s", "--species-list", required=True,
-                   help="Species list file (for color coding and species mapping)")
+                   help="Species list file [required]")
     p.add_argument("-b", "--bed-dir", default=".",
                    help="Directory containing .bed files (default: current dir)")
     p.add_argument("-o", "--output-dir", default=None,
